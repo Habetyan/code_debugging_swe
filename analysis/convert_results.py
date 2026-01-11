@@ -1,21 +1,3 @@
-import sys; import os; sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-#!/usr/bin/env python3
-"""
-Convert Results to SWE-bench Predictions Format
-
-Converts the internal results JSON format to the format expected by
-swebench.harness.run_evaluation.
-
-Output format:
-[
-  {
-    "instance_id": "...",
-    "model_patch": "...",
-    "model_name_or_path": "..."
-  }
-]
-"""
-
 import json
 import argparse
 import sys
@@ -31,7 +13,7 @@ def main():
         with open(args.results_file, 'r') as f:
             data = json.load(f)
     except Exception as e:
-        print(f"❌ Failed to load results: {e}")
+        print(f"[ERROR] Failed to load results: {e}")
         sys.exit(1)
         
     predictions = []
@@ -57,10 +39,7 @@ def main():
                 "model_name_or_path": model_name
             })
         else:
-            print(f"⚠️ No patch for {instance_id} attempt {args.attempt}")
-            # We can optionally include empty patch or skip. 
-            # SWE-bench harness usually expects all instances or handles missing ones.
-            # Let's include it with empty patch to be safe/explicit failure.
+            print(f"[WARN] No patch for {instance_id} attempt {args.attempt}")
             predictions.append({
                 "instance_id": instance_id,
                 "model_patch": "",
@@ -70,7 +49,7 @@ def main():
     with open(args.output_file, 'w') as f:
         json.dump(predictions, f, indent=2)
         
-    print(f"✅ Saved {len(predictions)} predictions to {args.output_file}")
+    print(f"[SUCCESS] Saved {len(predictions)} predictions to {args.output_file}")
 
 if __name__ == "__main__":
     main()

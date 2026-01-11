@@ -1,9 +1,3 @@
-"""
-Source Code Retrieval Module
-
-Clones repositories and extracts source files for inclusion in LLM prompts.
-"""
-
 import re
 import subprocess
 import tempfile

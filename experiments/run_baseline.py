@@ -79,12 +79,12 @@ def main():
     print(f"   Repos: {dict(repos)}")
     
     # Initialize provider
-    print(f"\n🤖 Initializing LLM provider...")
+    print(f"\nInitializing LLM provider...")
     print(f"   Model: {args.model}")
     
     try:
         llm = LLMProvider(model=args.model)
-        print("✓ Provider initialized successfully")
+        print("Provider initialized successfully")
     except ValueError as e:
         print(f"Failed to initialize provider: {e}")
         print("Please add your API key to .env file:")
@@ -98,7 +98,7 @@ def main():
     )
     
     # Run experiment
-    print(f"\n🚀 Running experiment...")
+    print(f"\nRunning experiment...")
     print(f"   Attempts per instance: {args.attempts}")
     print(f"   Dry run: {args.dry_run}")
     

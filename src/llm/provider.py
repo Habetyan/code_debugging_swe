@@ -1,10 +1,3 @@
-"""
-LLM Provider Module
-
-Handles communication with LLM APIs through OpenRouter.
-Includes response caching and rate limit handling.
-"""
-
 import os
 import time
 import hashlib

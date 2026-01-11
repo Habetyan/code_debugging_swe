@@ -1,10 +1,3 @@
-"""
-Document Corpus Module
-
-Handles loading, preprocessing, and managing the retrieval corpus.
-For Phase 2, we use a simple approach with Python documentation snippets.
-"""
-
 from dataclasses import dataclass
 from typing import Optional
 import json

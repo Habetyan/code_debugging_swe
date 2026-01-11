@@ -1,10 +1,3 @@
-"""
-Baseline Pipeline (Variant 1)
-
-Direct LLM-based bug fixing without retrieval augmentation.
-Input: Bug report + code context → LLM → Patch
-"""
-
 from dataclasses import dataclass
 from typing import Optional
 from src.data import SWEBenchInstance

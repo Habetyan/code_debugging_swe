@@ -1,10 +1,3 @@
-"""
-Hybrid Retriever Module
-
-Implements embedding-based (FAISS) and keyword-based (BM25) retrieval,
-with a hybrid combination strategy.
-"""
-
 import numpy as np
 from typing import Optional
 from sentence_transformers import SentenceTransformer

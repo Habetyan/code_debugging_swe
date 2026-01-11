@@ -1,9 +1,3 @@
-"""
-Code Graph Retrieval
-
-Analyzes source code to find dependencies (imports, inheritance) to expand context.
-"""
-
 import ast
 import os
 from pathlib import Path
