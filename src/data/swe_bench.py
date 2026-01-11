@@ -1,10 +1,3 @@
-"""
-SWE-bench-Lite Data Loader
-
-Downloads and processes the SWE-bench-Lite dataset from Hugging Face.
-Provides utilities for creating stratified subsets for experiments.
-"""
-
 from dataclasses import dataclass
 from typing import Optional
 from datasets import load_dataset

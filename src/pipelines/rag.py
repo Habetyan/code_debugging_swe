@@ -11,6 +11,7 @@ from src.retrieval import HybridRetriever
 from src.retrieval.source_code import RepoManager, extract_file_paths, get_source_context
 from src.retrieval.graph import CodeGraph
 from src.retrieval.corpus import create_sample_corpus
+from src.retrieval.example_retriever import ExampleRetriever
 from .baseline import BaselinePipeline, PipelineResult
 
 
@@ -47,6 +48,9 @@ RAG_PROMPT_TEMPLATE = """# Bug Report
 
 ## Related Files (Dependencies)
 {related_content}
+
+# Similar Solved Examples
+{examples_content}
 
 # Instructions
 1. Fix the bug in '{primary_file}' ONLY.
@@ -168,12 +172,65 @@ class RAGPipeline(BaselinePipeline):
         
         if include_docs:
             if retriever is None:
+                # Start with sample corpus, will be replaced per-instance
                 corpus = create_sample_corpus()
                 self.retriever = HybridRetriever(corpus)
             else:
                 self.retriever = retriever
+            
+            # Initialize Example Retriever (Few-Shot RAG)
+            try:
+                self.example_retriever = ExampleRetriever()
+            except Exception as e:
+                print(f"Warning: Could not init ExampleRetriever: {e}")
+                self.example_retriever = None
         else:
             self.retriever = None
+            self.example_retriever = None
+    
+    def _extract_repo_docs(self, repo_path: str) -> list:
+        """Extract documentation files from a repository."""
+        from src.retrieval.corpus import Document
+        
+        repo_path = Path(repo_path)
+        docs = []
+        
+        # Common doc directories
+        doc_dirs = ['doc', 'docs', 'documentation', 'examples']
+        
+        # Common doc file extensions
+        doc_extensions = ['.rst', '.md', '.txt']
+        
+        for doc_dir in doc_dirs:
+            dir_path = repo_path / doc_dir
+            if dir_path.exists() and dir_path.is_dir():
+                # Find all doc files
+                for ext in doc_extensions:
+                    for doc_file in dir_path.rglob(f'*{ext}'):
+                        try:
+                            content = doc_file.read_text(encoding='utf-8', errors='ignore')
+                            # Skip very large files
+                            if len(content) > 50000:
+                                content = content[:50000]
+                            
+                            # Create document
+                            doc = Document(
+                                doc_id=str(doc_file.relative_to(repo_path)),
+                                title=doc_file.stem,
+                                content=content,
+                                source=str(repo_path.name),
+                                library=str(repo_path.name).split('__')[0],
+                                doc_type='documentation'
+                            )
+                            docs.append(doc)
+                            
+                            # Limit to 50 docs to avoid indexing overhead
+                            if len(docs) >= 50:
+                                return docs
+                        except Exception:
+                            continue
+        
+        return docs
 
     def _find_primary_file(self, problem_statement: str, repo_path: str) -> Optional[str]:
         """Find the primary file to edit using multiple strategies.
@@ -320,6 +377,23 @@ class RAGPipeline(BaselinePipeline):
         # 1. Clone Repo
         repo_path = self.repo_manager.get_repo_path(instance.repo, instance.base_commit)
         
+        # 1.5. Index actual repo documentation (if RAG is enabled)
+        if self.retriever and self.include_docs:
+            repo_docs = self._extract_repo_docs(repo_path)
+            
+            if repo_docs:
+                # Re-index with actual docs
+                from src.retrieval.corpus import DocumentCorpus, Document
+                
+                corpus = DocumentCorpus()
+                
+                # Add repo docs
+                for doc in repo_docs:
+                    corpus.add(doc)
+                    
+                # Rebuild the retriever with new corpus
+                self.retriever = HybridRetriever(corpus)
+        
         # 2. Identify Primary File (using multiple strategies)
         primary_file = self._find_primary_file(instance.problem_statement, repo_path)
         
@@ -360,13 +434,28 @@ class RAGPipeline(BaselinePipeline):
             results = self.retriever.search(instance.problem_statement, top_k=3)
             doc_context = self.retriever.format_context(results)
 
+        # 4.5 Retrieve Similar Examples
+        examples_content = "No similar examples found."
+        if self.example_retriever:
+            try:
+                examples = self.example_retriever.retrieve(instance.problem_statement, instance.repo_name, k=2)
+                if examples:
+                    examples_content = ""
+                    for i, ex in enumerate(examples):
+                        examples_content += f"\n## Example {i+1} (from {ex['repo']})\n"
+                        examples_content += f"### Problem\n{ex['problem_statement'][:500]}...\n"
+                        examples_content += f"### Fix\n```diff\n{ex['patch']}\n```\n"
+            except Exception as e:
+                print(f"Error retrieving examples: {e}")
+
         # 5. Build Prompt
         prompt = RAG_PROMPT_TEMPLATE.format(
             problem_statement=instance.problem_statement,
             doc_context=doc_context,
             primary_file=primary_file,
             primary_content=primary_content,
-            related_content=related_content
+            related_content=related_content,
+            examples_content=examples_content
         )
 
         # 6. Generate with Syntax Validation Loop
