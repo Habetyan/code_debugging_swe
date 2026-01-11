@@ -1,7 +1,9 @@
-from typing import Optional
+from typing import Optional, Tuple, List
 from pathlib import Path
 import subprocess
 import re
+import tempfile
+import shutil
 
 from src.data import SWEBenchInstance
 from src.llm import LLMProvider
@@ -13,16 +15,16 @@ from .baseline import BaselinePipeline, PipelineResult
 
 
 RAG_SYSTEM_PROMPT = """You are an expert software engineer fixing bugs in Python code.
-You have access to:
-1. The buggy code
-2. Related code files (dependencies)
-3. Relevant documentation
 
-Your task is to analyze the code and dependencies to fix the bug described.
+IMPORTANT RULES:
+1. ONLY modify the file specified in the "Primary File" section.
+2. Do NOT invent new files or modify unrelated files.
+3. Ensure your patch is syntactically correct Python.
+4. Keep changes minimal - fix only the bug, don't refactor.
 
 OUTPUT FORMAT:
-Please provide a Unified Diff (git diff) to fix the issue.
-Start with:
+Provide a Unified Diff (git diff) to fix the issue.
+The file path in the diff MUST match the Primary File path exactly.
 ```diff
 --- a/path/to/file.py
 +++ b/path/to/file.py
@@ -47,19 +49,105 @@ RAG_PROMPT_TEMPLATE = """# Bug Report
 {related_content}
 
 # Instructions
-Fix the bug in '{primary_file}'. 
-Use the related files and documentation to understand the context.
-Output your fix as a Unified Diff.
+1. Fix the bug in '{primary_file}' ONLY.
+2. Do NOT modify any other file.
+3. Output a syntactically correct Unified Diff.
 """
+
+
+def extract_stacktrace_files(text: str) -> List[str]:
+    """Extract file paths from Python stacktraces."""
+    # Pattern: File "/path/to/file.py", line N
+    pattern = r'File ["\']([^"\']+\.py)["\'], line \d+'
+    matches = re.findall(pattern, text)
+    
+    result = []
+    for m in matches:
+        # If it's a site-packages path, extract the relative part AFTER site-packages
+        if 'site-packages' in m:
+            parts = m.split('site-packages')
+            if len(parts) > 1:
+                # Get the part after site-packages and strip leading slashes
+                relative = parts[1].lstrip('/\\')
+                # Normalize backslashes to forward slashes
+                relative = relative.replace('\\', '/')
+                if relative:
+                    result.append(relative)
+            continue
+        
+        # Skip stdlib paths
+        if '/usr/lib' in m or '/usr/local' in m or '\\Python3' in m:
+            continue
+            
+        # For other paths, try to extract relative part
+        if '/' in m or '\\\\' in m:
+            # Normalize to forward slashes
+            normalized = m.replace('\\\\', '/')
+            parts = normalized.split('/')
+            # Find repo-like starting points
+            for i, part in enumerate(parts):
+                if part in ['src', 'lib', 'tests', 'sklearn', 'sympy', 'matplotlib', 
+                           'requests', 'pylint', 'sphinx', 'seaborn', 'django', 'flask']:
+                    result.append('/'.join(parts[i:]))
+                    break
+    
+    return result
+
+
+
+def module_to_filepath(module_path: str) -> str:
+    """Convert Python module path to file path.
+    
+    Example: sklearn.utils.multiclass -> sklearn/utils/multiclass.py
+    """
+    return module_path.replace('.', '/') + '.py'
+
+
+def extract_module_paths(text: str) -> List[str]:
+    """Extract Python module paths from text.
+    
+    Looks for patterns like:
+    - from sklearn.utils.multiclass import ...
+    - import sympy.physics.units
+    - sklearn.preprocessing._label
+    """
+    patterns = [
+        r'from\s+([\w\.]+)\s+import',  # from module.path import
+        r'import\s+([\w\.]+)',          # import module.path
+        r'([\w]+(?:\.[\w]+){2,})',      # any dotted path with 3+ parts
+    ]
+    
+    modules = set()
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        for m in matches:
+            # Skip if it's a method call or attribute access
+            if m.startswith('.') or m.endswith('.'):
+                continue
+            # Only consider paths with at least 2 parts
+            if '.' in m:
+                modules.add(m)
+    
+    return list(modules)
+
+
+def validate_python_syntax(code: str) -> Tuple[bool, str]:
+    """Validate Python syntax by attempting to compile."""
+    try:
+        compile(code, '<string>', 'exec')
+        return True, ""
+    except SyntaxError as e:
+        return False, f"SyntaxError at line {e.lineno}: {e.msg}"
 
 
 class RAGPipeline(BaselinePipeline):
     """
     Advanced RAG Pipeline with:
-    1. Source Code Retrieval (Cloning & Finding Files)
-    2. Symbol Search Fallback (Grep)
-    3. Code Graph Expansion (Imports/Dependencies)
-    4. Documentation Retrieval
+    1. Stacktrace Parsing for file identification
+    2. Module Path to File conversion
+    3. Symbol Search Fallback (Functions and Classes)
+    4. Code Graph Expansion
+    5. Syntax Validation
     """
     
     def __init__(
@@ -70,11 +158,13 @@ class RAGPipeline(BaselinePipeline):
         temperature: float = 0.2,
         max_tokens: int = 4096,
         include_docs: bool = True,
+        max_syntax_retries: int = 2,
     ):
         super().__init__(llm_provider, temperature, max_tokens)
         
         self.repo_manager = repo_manager or RepoManager()
         self.include_docs = include_docs
+        self.max_syntax_retries = max_syntax_retries
         
         if include_docs:
             if retriever is None:
@@ -85,55 +175,163 @@ class RAGPipeline(BaselinePipeline):
         else:
             self.retriever = None
 
+    def _find_primary_file(self, problem_statement: str, repo_path: str) -> Optional[str]:
+        """Find the primary file to edit using multiple strategies.
+        
+        Priority order (most to least reliable):
+        1. Stacktrace files - shows exact error location
+        2. Explicit file paths in text
+        3. Module paths converted to files
+        4. Class name grep
+        5. Function name grep
+        """
+        
+        # Strategy 1: Parse stacktraces (HIGHEST PRIORITY - shows error location)
+        stacktrace_files = extract_stacktrace_files(problem_statement)
+        for fp in stacktrace_files:
+            # Try exact match first
+            if (Path(repo_path) / fp).exists():
+                return fp
+            # Try without leading path segment
+            if '/' in fp:
+                short = fp.split('/', 1)[1]
+                if (Path(repo_path) / short).exists():
+                    return short
+        
+        # Strategy 2: Extract explicit file paths (e.g., "in file foo/bar.py")
+        file_paths = extract_file_paths(problem_statement)
+        for fp in file_paths:
+            if (Path(repo_path) / fp).exists():
+                return fp
+        
+        # Strategy 3: Convert module paths to file paths
+        module_paths = extract_module_paths(problem_statement)
+        for mp in module_paths:
+            fp = module_to_filepath(mp)
+            if (Path(repo_path) / fp).exists():
+                return fp
+            # Try with leading dirs
+            for prefix in ['src', 'lib', '']:
+                candidate = f"{prefix}/{fp}" if prefix else fp
+                if (Path(repo_path) / candidate).exists():
+                    return candidate
+        
+        # Strategy 4: Search for class names
+        class_names = re.findall(r'\b[A-Z][a-zA-Z0-9]+\b', problem_statement)
+        for cls_name in class_names:
+            if len(cls_name) < 4:
+                continue
+            try:
+                result = subprocess.run(
+                    ["grep", "-r", "-l", f"class {cls_name}", "."],
+                    cwd=str(repo_path),
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if result.returncode == 0 and result.stdout:
+                    for line in result.stdout.splitlines():
+                        if line.endswith('.py') and 'test' not in line.lower():
+                            return line.lstrip('./')
+            except Exception:
+                pass
+        
+        # Strategy 5: Search for function names (snake_case)
+        func_names = re.findall(r'\b([a-z_][a-z0-9_]+)\s*\(', problem_statement)
+        for func_name in func_names:
+            if len(func_name) < 5 or func_name in ['print', 'range', 'list', 'dict', 'set', 'str', 'int', 'float']:
+                continue
+            try:
+                result = subprocess.run(
+                    ["grep", "-r", "-l", f"def {func_name}", "."],
+                    cwd=str(repo_path),
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if result.returncode == 0 and result.stdout:
+                    for line in result.stdout.splitlines():
+                        if line.endswith('.py') and 'test' not in line.lower():
+                            return line.lstrip('./')
+            except Exception:
+                pass
+        
+        # Strategy 6: Search for identifiers in backticks (e.g., `__isnull`, `MyClass`)
+        # These are often class/method names mentioned in feature requests
+        backtick_ids = re.findall(r'`([A-Za-z_][A-Za-z0-9_]*)`', problem_statement)
+        for identifier in backtick_ids:
+            if len(identifier) < 4:
+                continue
+            try:
+                # Search for class or def with this name
+                result = subprocess.run(
+                    ["grep", "-r", "-l", f"class {identifier}\\|def {identifier}", "."],
+                    cwd=str(repo_path),
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if result.returncode == 0 and result.stdout:
+                    for line in result.stdout.splitlines():
+                        if line.endswith('.py') and 'test' not in line.lower():
+                            return line.lstrip('./')
+            except Exception:
+                pass
+        
+        return None
+
+    def _validate_patch_syntax(self, patch: str, repo_path: str, primary_file: str) -> Tuple[bool, str]:
+        """Apply patch to a temp copy and validate syntax."""
+        if not patch.strip() or not primary_file:
+            return False, "Empty patch or no primary file"
+        
+        try:
+            # Create temp directory
+            with tempfile.TemporaryDirectory() as tmpdir:
+                # Copy the file
+                src = Path(repo_path) / primary_file
+                if not src.exists():
+                    return False, f"File {primary_file} not found"
+                
+                dst = Path(tmpdir) / "test.py"
+                shutil.copy(src, dst)
+                
+                # Apply patch
+                proc = subprocess.run(
+                    ["patch", "-p1", "--no-backup-if-mismatch"],
+                    input=patch,
+                    cwd=tmpdir,
+                    capture_output=True,
+                    text=True
+                )
+                
+                if proc.returncode != 0:
+                    return False, f"Patch failed to apply: {proc.stderr}"
+                
+                # Validate syntax
+                content = dst.read_text()
+                valid, error = validate_python_syntax(content)
+                return valid, error
+                
+        except Exception as e:
+            return False, str(e)
+
     def run(self, instance: SWEBenchInstance) -> PipelineResult:
         # 1. Clone Repo
         repo_path = self.repo_manager.get_repo_path(instance.repo, instance.base_commit)
         
-        # 2. Identify Primary File
-        # Try to find file paths in the problem statement
-        file_paths = extract_file_paths(instance.problem_statement)
+        # 2. Identify Primary File (using multiple strategies)
+        primary_file = self._find_primary_file(instance.problem_statement, repo_path)
         
-        primary_file = None
-        if file_paths:
-            # Check which exists
-            for fp in file_paths:
-                if (Path(repo_path) / fp).exists():
-                    primary_file = fp
-                    break
-        
-        if not primary_file:
-            # Fallback: Search for class names in problem statement
-            # Look for CamelCase words that might be classes
-            potential_classes = re.findall(r'\\b[A-Z][a-zA-Z0-9]+\\b', instance.problem_statement)
-            
-            for cls_name in potential_classes:
-                if len(cls_name) < 4: continue # Skip short ones
-                
-                # Grep for "class ClsName"
-                try:
-                    result = subprocess.run(
-                        ["grep", "-r", "-l", f"class {cls_name}", "."],
-                        cwd=str(repo_path),
-                        capture_output=True,
-                        text=True
-                    )
-                    if result.returncode == 0 and result.stdout:
-                        # Pick first match that is a python file
-                        for line in result.stdout.splitlines():
-                            if line.endswith('.py') and 'test' not in line:
-                                primary_file = line
-                                break
-                        if primary_file:
-                            break
-                except Exception:
-                    pass
-
         primary_content = ""
         related_content = ""
         
         if primary_file:
             try:
                 primary_content = (Path(repo_path) / primary_file).read_text()
+                # Truncate if very long
+                if len(primary_content) > 10000:
+                    primary_content = primary_content[:10000] + "\n... (truncated)"
             except Exception:
                 primary_content = "# Error reading file"
             
@@ -142,19 +340,19 @@ class RAGPipeline(BaselinePipeline):
                 graph = CodeGraph(repo_path)
                 related_files = graph.get_related_files(primary_file, max_depth=1)
                 
-                for rf in related_files[:3]: # Limit to top 3 related files
+                for rf in related_files[:3]:
                     try:
                         content = (Path(repo_path) / rf).read_text()
-                        # Truncate if too long
                         if len(content) > 2000:
-                            content = content[:2000] + "\\n... (truncated)"
-                        related_content += f"\\n### {rf}\\n```python\\n{content}\\n```\\n"
+                            content = content[:2000] + "\n... (truncated)"
+                        related_content += f"\n### {rf}\n```python\n{content}\n```\n"
                     except:
                         pass
             except Exception:
-                pass # Graph analysis failed, proceed without it
+                pass
         else:
             primary_content = "# Could not identify primary file from problem statement"
+            primary_file = "unknown"
 
         # 4. Retrieve Docs
         doc_context = ""
@@ -166,22 +364,44 @@ class RAGPipeline(BaselinePipeline):
         prompt = RAG_PROMPT_TEMPLATE.format(
             problem_statement=instance.problem_statement,
             doc_context=doc_context,
-            primary_file=primary_file or "unknown",
+            primary_file=primary_file,
             primary_content=primary_content,
             related_content=related_content
         )
 
-        # 6. Generate
-        response = self.llm.generate(
-            prompt=prompt,
-            system_prompt=RAG_SYSTEM_PROMPT,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens
-        )
+        # 6. Generate with Syntax Validation Loop
+        generated_patch = ""
+        syntax_error = ""
+        
+        for attempt in range(self.max_syntax_retries + 1):
+            # Add syntax error to prompt if retrying
+            current_prompt = prompt
+            if syntax_error:
+                current_prompt += f"\n\n# PREVIOUS ATTEMPT FAILED\nYour previous patch had a syntax error:\n{syntax_error}\n\nPlease fix the syntax error and try again."
+            
+            response = self.llm.generate(
+                prompt=current_prompt,
+                system_prompt=RAG_SYSTEM_PROMPT,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens
+            )
 
-        # 7. Extract Patch
-        # We use the base class method which looks for ```diff blocks
-        generated_patch = self._extract_patch(response)
+            generated_patch = self._extract_patch(response)
+            
+            if not generated_patch:
+                break  # No patch generated, skip validation
+            
+            # Validate syntax
+            if primary_file and primary_file != "unknown":
+                valid, error = self._validate_patch_syntax(generated_patch, repo_path, primary_file)
+                if valid:
+                    break
+                else:
+                    syntax_error = error
+                    if attempt < self.max_syntax_retries:
+                        continue  # Retry
+            else:
+                break  # Can't validate without knowing the file
         
         return PipelineResult(
             instance_id=instance.instance_id,

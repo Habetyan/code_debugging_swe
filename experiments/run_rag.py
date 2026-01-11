@@ -70,11 +70,16 @@ def main():
     all_instances = load_swe_bench_lite()
     
     if args.instance_id:
-        instances = [i for i in all_instances if i.instance_id == args.instance_id]
-        if not instances:
-            print(f"[ERROR] Instance {args.instance_id} not found!")
-            return
-        print(f"Running single instance: {instances[0].instance_id}")
+        if ',' in args.instance_id:
+            target_ids = args.instance_id.split(',')
+            instances = [i for i in all_instances if i.instance_id in target_ids]
+            print(f"Running {len(instances)} specific instances: {[i.instance_id for i in instances]}")
+        else:
+            instances = [i for i in all_instances if i.instance_id == args.instance_id]
+            if not instances:
+                print(f"[ERROR] Instance {args.instance_id} not found!")
+                return
+            print(f"Running single instance: {instances[0].instance_id}")
     else:
         instances = create_stratified_subset(all_instances, n=args.num_instances)
         print(f"Running {len(instances)} instances")
