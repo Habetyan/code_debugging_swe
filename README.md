@@ -1,16 +1,18 @@
-# Code Debugging with RAG
+# Code Debugging with RAG + CoT
 
-A RAG (Retrieval-Augmented Generation) pipeline for automated bug fixing on the SWE-bench Lite benchmark.
+A RAG (Retrieval-Augmented Generation) pipeline with Chain-of-Thought (CoT) localization for automated bug fixing on the SWE-bench Lite benchmark.
 
 ## Overview
 
-This project uses an LLM to generate patches that fix software bugs. It retrieves relevant documentation and code context from the target repository to help the LLM produce accurate fixes.
+This project uses an LLM to generate patches that fix software bugs. It combines:
+1. **CoT Localization**: Accurately identifying the file to edit.
+2. **RAG**: Retrieving relevant documentation and similar solved bugs.
 
 **Pipeline Steps:**
 1. Load a bug report from SWE-bench Lite
 2. Clone the repository at the correct commit
-3. Identify the file that needs to be edited (using stacktraces, module paths, or grep)
-4. Retrieve relevant documentation from the repo
+3. **Localize File**: Use CoT to find the primary file to edit.
+4. Retrieve relevant documentation and examples.
 5. Send the context + bug report to the LLM
 6. Generate a unified diff patch
 7. Validate syntax and convert to strict git format
@@ -42,73 +44,59 @@ OPENROUTER_API_KEY=your_key_here
 
 ## 3. Running the Pipeline
 
+The main command uses `run_cot.py` for the best performance.
+
 ### Run on a single bug instance
 ```bash
-python experiments/run_rag.py --instance-id mwaskom__seaborn-3010
+PYTHONPATH=. python experiments/run_cot.py --instance-id mwaskom__seaborn-3010
 ```
 
 ### Run on multiple instances
 ```bash
-python experiments/run_rag.py --num-instances 5 --experiment-name my_run
+PYTHONPATH=. python experiments/run_cot.py --n 5 --experiment-name my_run
 ```
 
 ### Run on specific instances (comma-separated)
 ```bash
-python experiments/run_rag.py --instance-id django__django-11099,scikit-learn__scikit-learn-10297
+PYTHONPATH=. python experiments/run_cot.py --instance-id django__django-11099,scikit-learn__scikit-learn-10297
 ```
 
 **Arguments:**
 | Argument | Description | Default |
 |----------|-------------|---------|
 | `--instance-id` | Specific instance ID(s) to run | None |
-| `--num-instances`, `-n` | Number of random instances | 1 |
+| `--n`, `-n` | Number of random instances | 10 |
 | `--model`, `-m` | LLM model to use | `deepseek/deepseek-chat` |
-| `--experiment-name`, `-e` | Name for output file | `rag_best` |
+| `--experiment-name`, `-e` | Name for output file | `cot_run` |
 
 ---
 
 ## 4. Analyze Results
 
-After running, check the generated patches:
+To check localization accuracy (CoT vs Ground Truth):
 ```bash
-python analysis/analyze.py --run-id my_run
+python analysis/check_localization.py results/my_run.json
 ```
-
-This shows statistics about patch generation success rates.
 
 ---
-### TO-DO
-## 5. Official SWE-bench to-do
 
-To verify if patches actually fix the bugs we will test on the official SWE-bench later.
+## 5. Official SWE-bench Evaluation
 
-### Install SWE-bench
-```bash
-pip install swe-bench
-```
+To verify if patches actually fix the bugs:
 
 ### Convert results to SWE-bench format
 ```bash
-python analysis/convert_results.py --input results/my_run.json --output predictions.json
+python analysis/convert_results.py results/my_run.json predictions.json
 ```
 
 ### Run official evaluation
 ```bash
 python -m swebench.harness.run_evaluation \
     --predictions_path predictions.json \
-    --swe_bench_tasks princeton-nlp/SWE-bench_Lite \
-    --log_dir ./eval_logs \
-    --testbed ./testbed \
-    --skip_existing \
-    --timeout 9000 \
-    --verbose
+    --dataset_name princeton-nlp/SWE-bench_Lite \
+    --run_id my_run_eval \
+    --timeout 900
 ```
-
-This will:
-- Clone each repository
-- Apply your generated patch
-- Run the test suite
-- Report pass/fail for each instance
 
 ---
 
@@ -117,14 +105,16 @@ This will:
 ```
 code_debuging_with_rag_cot/
 ├── experiments/
-│   ├── run_rag.py          # Main script to run the RAG pipeline
-│   └── run_baseline.py     # Baseline without RAG 
+│   ├── run_cot.py          # Main CoT+RAG experiment runner (Use this!)
+│   ├── run_rag.py          # Baseline RAG runner
+│   └── run_baseline.py     # Simple baseline 
 ├── src/
 │   ├── data/               # SWE-bench data loading
 │   ├── llm/                # LLM provider abstraction
 │   ├── pipelines/
+│   │   ├── cot.py          # Chain-of-Thought pipeline (New)
 │   │   ├── baseline.py     # Simple prompt-only pipeline
-│   │   └── rag.py          # Full RAG pipeline with retrieval
+│   │   └── rag.py          # Standard RAG pipeline
 │   ├── retrieval/
 │   │   ├── corpus.py       # Document storage
 │   │   ├── indexer.py      # Hybrid retrieval (FAISS + BM25)
@@ -133,7 +123,8 @@ code_debuging_with_rag_cot/
 │   │   └── example_retriever.py  # Example retriever
 │   ├── evaluation/         # Metrics and experiment runner
 │   └── utils/              # Fuzzy patching utilities
-├── analysis/               # Result analysis scripts
-├── results/                # Output JSON files
-└── repo_cache/             # Cloned repositories (auto-created)
+├── analysis/               # Analysis scripts
+│   ├── check_localization.py # Localization accuracy checker
+│   ├── convert_results.py    # Convert to SWE-bench format
+└── results/                # Output JSON files
 ```

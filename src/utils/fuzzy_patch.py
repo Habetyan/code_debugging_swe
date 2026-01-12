@@ -1,270 +1,190 @@
-"""
-Fuzzy Patch Application
-
-Applies patches even when context lines don't match exactly.
-Uses fuzzy string matching to find the target location.
-"""
-
 import re
 import difflib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Tuple
 
+@dataclass
+class HunkLine:
+    type: str  # ' ', '-', '+'
+    content: str
 
 @dataclass
 class PatchHunk:
-    """A single hunk from a unified diff."""
     file_path: str
-    old_start: int
-    old_count: int
-    new_start: int
-    new_count: int
-    context_lines: list[str]  # Lines starting with ' '
-    removed_lines: list[str]  # Lines starting with '-'
-    added_lines: list[str]    # Lines starting with '+'
+    lines: List[HunkLine]
+    
+    @property
+    def source_block(self) -> str:
+        """The specific block of code expected to be in the original file."""
+        return '\n'.join(line.content for line in self.lines if line.type in (' ', '-'))
+    
+    @property
+    def target_block(self) -> str:
+        """The block of code that should replace the source block."""
+        return '\n'.join(line.content for line in self.lines if line.type in (' ', '+'))
 
 
-def parse_unified_diff(patch: str) -> list[PatchHunk]:
-    """Parse a unified diff into hunks."""
+def parse_unified_diff(patch: str) -> List[PatchHunk]:
+    """Parse a unified diff into hunks, preserving line order."""
     hunks = []
     lines = patch.split('\n')
-    
     current_file = None
     i = 0
     
     while i < len(lines):
         line = lines[i]
         
-        # File header
         if line.startswith('--- a/'):
             current_file = line[6:]
             i += 1
             continue
-        
         if line.startswith('+++ b/'):
             i += 1
             continue
-        
-        # Hunk header
+            
         if line.startswith('@@'):
-            # Parse @@ -old_start,old_count +new_start,new_count @@
-            match = re.match(r'@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@', line)
-            if match:
-                old_start = int(match.group(1))
-                old_count = int(match.group(2) or 1)
-                new_start = int(match.group(3))
-                new_count = int(match.group(4) or 1)
+            hunk_lines = []
+            i += 1
+            while i < len(lines):
+                line = lines[i]
+                if line.startswith('@@') or line.startswith('---'):
+                    break
                 
-                # Collect hunk lines
-                context = []
-                removed = []
-                added = []
-                
+                if line.startswith(' ') or line.startswith('-') or line.startswith('+'):
+                    hunk_lines.append(HunkLine(line[0], line[1:]))
+                elif not line.strip():
+                    # Empty line in patch, usually context
+                    hunk_lines.append(HunkLine(' ', ''))
+                else:
+                    # Look ahead/break on unknown formats
+                    break
                 i += 1
-                while i < len(lines) and lines[i] and not lines[i].startswith('@@') and not lines[i].startswith('---'):
-                    hline = lines[i]
-                    if hline.startswith(' '):
-                        context.append(hline[1:])
-                    elif hline.startswith('-'):
-                        removed.append(hline[1:])
-                    elif hline.startswith('+'):
-                        added.append(hline[1:])
-                    i += 1
                 
+            if hunk_lines:
                 hunks.append(PatchHunk(
                     file_path=current_file or 'unknown.py',
-                    old_start=old_start,
-                    old_count=old_count,
-                    new_start=new_start,
-                    new_count=new_count,
-                    context_lines=context,
-                    removed_lines=removed,
-                    added_lines=added,
+                    lines=hunk_lines
                 ))
-                continue
-        
+            continue
+            
         i += 1
-    
+        
     return hunks
 
 
-def fuzzy_find_location(content: str, search_lines: list[str], threshold: float = 0.8) -> Optional[int]:
-    """
-    Find the location of search_lines in content using fuzzy matching.
-    Returns the character offset or None if not found.
-    """
-    content_lines = content.split('\n')
+def fuzzy_find(content_lines: List[str], search_lines: List[str], threshold: float = 0.8) -> Tuple[Optional[int], float]:
+    """Find the best matching location for search_lines in content_lines."""
+    if not search_lines:
+        return None, 1.0
+        
+    best_ratio = 0.0
+    best_idx = None
+    
+    # Simple optimization: content usually contains explicit unique logic
     search_text = '\n'.join(search_lines)
+    n_search = len(search_lines)
     
-    best_ratio = 0
-    best_start = None
-    
-    # Slide window through file
-    for i in range(len(content_lines) - len(search_lines) + 1):
-        window = '\n'.join(content_lines[i:i + len(search_lines)])
+    for i in range(len(content_lines) - n_search + 1):
+        window = '\n'.join(content_lines[i : i + n_search])
         ratio = difflib.SequenceMatcher(None, search_text, window).ratio()
         
         if ratio > best_ratio:
             best_ratio = ratio
-            best_start = i
-    
-    if best_ratio >= threshold:
-        # Convert line index to character offset
-        offset = sum(len(line) + 1 for line in content_lines[:best_start])
-        return offset
-    
-    return None
+            best_idx = i
+            
+            if ratio > 0.99: # Perfect match optimization
+                break
+                
+    return best_idx, best_ratio
 
 
-def apply_hunk_fuzzy(content: str, hunk: PatchHunk, threshold: float = 0.7) -> tuple[str, bool]:
-    """
-    Apply a single hunk to content using fuzzy matching.
-    Returns (new_content, success).
-    """
+def apply_hunk_fuzzy(content: str, hunk: PatchHunk, threshold: float = 0.6) -> Tuple[str, bool]:
+    """Apply a single hunk to content using fuzzy matching."""
     content_lines = content.split('\n')
     
-    # Build search pattern from removed lines or context
-    search_lines = hunk.removed_lines if hunk.removed_lines else hunk.context_lines[:3]
+    # 1. Build source block (lines to look for)
+    source_lines = [line.content for line in hunk.lines if line.type in (' ', '-')]
     
-    # Handle addition-only hunks (no removed lines, no context)
-    if not search_lines:
-        # Use line number from hunk header for insertion
-        insert_line = max(0, hunk.old_start - 1)
-        if insert_line <= len(content_lines):
-            new_lines = (
-                content_lines[:insert_line] +
-                hunk.added_lines +
-                content_lines[insert_line:]
-            )
-            return '\n'.join(new_lines), True
-        return content, False
+    # 2. Build target block (lines to replace with)
+    target_lines = [line.content for line in hunk.lines if line.type in (' ', '+')]
     
-    search_text = '\n'.join(search_lines)
+    # 3. Handle specific case: Addition only (no context)
+    if not source_lines:
+        # Append to end if no context (rare for valid unified diffs)
+        return content + '\n' + '\n'.join(target_lines), True
+
+    # 4. Find location
+    match_idx, ratio = fuzzy_find(content_lines, source_lines, threshold)
     
-    # Find best match
-    best_ratio = 0
-    best_start = None
-    
-    for i in range(len(content_lines)):
-        window_end = min(i + len(search_lines), len(content_lines))
-        window = content_lines[i:window_end]
-        window_text = '\n'.join(window)
+    if match_idx is not None and ratio >= threshold:
+        # 5. Apply replacement
+        new_lines = (
+            content_lines[:match_idx] +
+            target_lines +
+            content_lines[match_idx + len(source_lines):]
+        )
+        return '\n'.join(new_lines), True
         
-        ratio = difflib.SequenceMatcher(None, search_text, window_text).ratio()
-        
-        if ratio > best_ratio:
-            best_ratio = ratio
-            best_start = i
-    
-    if best_ratio < threshold or best_start is None:
-        return content, False
-    
-    # Apply the change
-    new_lines = (
-        content_lines[:best_start] +
-        hunk.added_lines +
-        content_lines[best_start + len(search_lines):]
-    )
-    
-    return '\n'.join(new_lines), True
+    return content, False
 
 
 def resolve_file_path(repo_path: Path, file_path_str: str) -> Optional[Path]:
-    """
-    Resolve a file path from a patch, handling potential hallucinations.
-    Strategies:
-    1. Exact match
-    2. Basename match (e.g. label.py -> sklearn/preprocessing/label.py)
-    3. Fuzzy name match (e.g. label.py -> _label.py)
-    """
+    """Resolve file path with fuzzy fallback."""
     repo = Path(repo_path)
     fpath = repo / file_path_str
     
-    # 1. Exact match
     if fpath.exists():
         return fpath
         
-    # 2. Basename match
+    # Basename match
     basename = Path(file_path_str).name
     matches = list(repo.rglob(f"**/{basename}"))
     if matches:
-        # Prefer shortest path or one that matches parent dirs
         return matches[0]
-        
-    # 3. Fuzzy name match (Levenshtein on basename)
-    # Get all python files
-    all_files = list(repo.rglob("*.py"))
-    best_match = None
-    best_ratio = 0.0
-    
-    for cand in all_files:
-        ratio = difflib.SequenceMatcher(None, basename, cand.name).ratio()
-        if ratio > best_ratio:
-            best_ratio = ratio
-            best_match = cand
-            
-    if best_ratio > 0.8: # High confidence threshold
-        return best_match
         
     return None
 
 
-def apply_patch_fuzzy(patch: str, repo_path: str, threshold: float = 0.7) -> tuple[bool, str, list[str]]:
-    """
-    Apply a patch to a repository using fuzzy matching.
-    
-    Returns:
-        (success, message, files_modified)
-    """
+def apply_patch_fuzzy(patch: str, repo_path: str, threshold: float = 0.6) -> Tuple[bool, str, List[str]]:
+    """Apply a patch to a repository."""
     hunks = parse_unified_diff(patch)
-    
     if not hunks:
-        return False, "No hunks found in patch", []
-    
+        return False, "No hunks parsed", []
+        
     files_modified = []
     messages = []
+    all_success = True
     
+    # Group hunks by file to apply sequentially
+    from collections import defaultdict
+    hunks_by_file = defaultdict(list)
     for hunk in hunks:
-        file_path = resolve_file_path(Path(repo_path), hunk.file_path)
+        hunks_by_file[hunk.file_path].append(hunk)
+        
+    for file_path_str, file_hunks in hunks_by_file.items():
+        file_path = resolve_file_path(Path(repo_path), file_path_str)
         
         if not file_path:
-            messages.append(f"File not found (and no fuzzy match): {hunk.file_path}")
+            messages.append(f"File not found: {file_path_str}")
+            all_success = False
             continue
             
         content = file_path.read_text()
-        new_content, success = apply_hunk_fuzzy(content, hunk, threshold)
+        original_content = content
+        file_success = True
         
-        if success:
-            file_path.write_text(new_content)
+        for hunk in file_hunks:
+            content, success = apply_hunk_fuzzy(content, hunk, threshold)
+            if not success:
+                file_success = False
+                messages.append(f"Failed hunk in {file_path_str}")
+                break
+        
+        if file_success and content != original_content:
+            file_path.write_text(content)
             files_modified.append(str(file_path.relative_to(repo_path)))
-            messages.append(f"Applied hunk to {file_path.relative_to(repo_path)} (orig: {hunk.file_path})")
-        else:
-            messages.append(f"Failed to apply hunk to {hunk.file_path}")
-    
-    all_success = len(files_modified) > 0
+        elif not file_success:
+            all_success = False
+            
     return all_success, '\n'.join(messages), files_modified
-
-
-def test_patch_fuzzy(patch: str, repo_path: str, threshold: float = 0.7) -> tuple[bool, str]:
-    """
-    Test if a patch can be applied using fuzzy matching (without modifying files).
-    """
-    hunks = parse_unified_diff(patch)
-    
-    if not hunks:
-        return False, "No hunks found"
-    
-    for hunk in hunks:
-        file_path = resolve_file_path(Path(repo_path), hunk.file_path)
-        
-        if not file_path:
-            return False, f"File not found: {hunk.file_path}"
-        
-        content = file_path.read_text()
-        _, success = apply_hunk_fuzzy(content, hunk, threshold)
-        
-        if not success:
-            return False, f"Cannot match hunk in {file_path.name}"
-    
-    return True, "All hunks can be applied"

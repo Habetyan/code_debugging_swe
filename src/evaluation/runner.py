@@ -1,9 +1,3 @@
-"""
-Experiment Runner
-
-Orchestrates running experiments and saving results.
-"""
-
 import json
 from pathlib import Path
 from datetime import datetime
@@ -75,6 +69,7 @@ class ExperimentRunner:
             instance_result = {
                 "instance_id": instance.instance_id,
                 "repo": instance.repo,
+                "base_commit": instance.base_commit,
                 "attempts": [],
             }
             
@@ -91,6 +86,9 @@ class ExperimentRunner:
                 })
             
             results["instances"].append(instance_result)
+            
+            # Save checkpoints after each instance
+            self._save_results(results)
         
         # Save results
         self._save_results(results)
