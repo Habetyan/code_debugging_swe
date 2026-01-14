@@ -88,9 +88,9 @@ def extract_stacktrace_files(text: str) -> List[str]:
             continue
             
         # For other paths, try to extract relative part
-        if '/' in m or '\\\\' in m:
+        if '/' in m or '\\' in m:
             # Normalize to forward slashes
-            normalized = m.replace('\\\\', '/')
+            normalized = m.replace('\\', '/')
             parts = normalized.split('/')
             # Find repo-like starting points
             for i, part in enumerate(parts):
@@ -470,7 +470,8 @@ class RAGPipeline(BaselinePipeline):
         # 6. Generate with Syntax Validation Loop
         generated_patch = ""
         syntax_error = ""
-        
+        response = ""
+
         for attempt in range(self.max_syntax_retries + 1):
             # Add syntax error to prompt if retrying
             current_prompt = prompt

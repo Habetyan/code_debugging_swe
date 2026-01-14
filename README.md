@@ -67,19 +67,10 @@ PYTHONPATH=. python experiments/run_cot.py --instance-id django__django-11099,sc
 | `--instance-id` | Specific instance ID(s) to run | None |
 | `--n`, `-n` | Number of random instances | 10 |
 | `--model`, `-m` | LLM model to use | `deepseek/deepseek-chat` |
-| `--experiment-name`, `-e` | Name for output file | `cot_run` |
-| `--dataset` | SWE-bench dataset variant | `lite` |
+| `--experiment-name`, `-e` | Name for output file | `cot_dev` |
+| `--temperature`, `-t` | LLM temperature | 0.2 |
 
-### Available SWE-bench Datasets
-```bash
-# SWE-bench Lite (300 instances, curated for quality)
-PYTHONPATH=. python experiments/run_cot.py --dataset lite --n 10
-
-# SWE-bench Dev (smaller dev set for quick testing)
-PYTHONPATH=. python experiments/run_cot.py --dataset dev --n 5
-```
-
-**Dataset options:** `lite` (default, 300 instances) | `dev` (smaller test set)
+Note: The pipeline uses SWE-bench Full dev split (225 instances) by default.
 
 ---
 
@@ -87,7 +78,7 @@ PYTHONPATH=. python experiments/run_cot.py --dataset dev --n 5
 
 To check localization accuracy (CoT vs Ground Truth):
 ```bash
-python analysis/check_localization.py results/my_run.json
+python tests/check_localization.py results/my_run.json
 ```
 
 ---
@@ -98,7 +89,7 @@ To verify if patches actually fix the bugs:
 
 ### Convert results to SWE-bench format
 ```bash
-python analysis/convert_results.py results/my_run.json predictions.json
+python src/verification/convert_results.py results/my_run.json predictions.json
 ```
 
 ### Run official evaluation
@@ -118,25 +109,29 @@ python -m swebench.harness.run_evaluation \
 code_debuging_with_rag_cot/
 ├── experiments/
 │   ├── run_cot.py          # Main CoT+RAG experiment runner (Use this!)
-│   ├── run_rag.py          # Baseline RAG runner
-│   └── run_baseline.py     # Simple baseline 
+│   ├── run_rag.py          # RAG pipeline runner
+│   ├── run_agentic.py      # Agentic pipeline runner
+│   └── run_baseline.py     # Simple baseline
 ├── src/
 │   ├── data/               # SWE-bench data loading
 │   ├── llm/                # LLM provider abstraction
 │   ├── pipelines/
-│   │   ├── cot.py          # Chain-of-Thought pipeline (New)
+│   │   ├── cot.py          # Chain-of-Thought pipeline
 │   │   ├── baseline.py     # Simple prompt-only pipeline
-│   │   └── rag.py          # Standard RAG pipeline
+│   │   ├── rag.py          # Standard RAG pipeline
+│   │   └── agentic.py      # Agentic ReAct pipeline
 │   ├── retrieval/
 │   │   ├── corpus.py       # Document storage
 │   │   ├── indexer.py      # Hybrid retrieval (FAISS + BM25)
 │   │   ├── graph.py        # Code dependency graph
-│   │   └── source_code.py  # Repository management
-│   │   └── example_retriever.py  # Example retriever
+│   │   ├── source_code.py  # Repository management
+│   │   └── example_retriever.py  # Similar bug retriever
 │   ├── evaluation/         # Metrics and experiment runner
+│   ├── verification/       # Patch verification harness
+│   │   ├── harness.py      # SWE-bench verification wrapper
+│   │   └── convert_results.py  # Convert to SWE-bench format
 │   └── utils/              # Fuzzy patching utilities
-├── analysis/               # Analysis scripts
-│   ├── check_localization.py # Localization accuracy checker
-│   ├── convert_results.py    # Convert to SWE-bench format
+├── tests/                  # Test and analysis scripts
+│   └── check_localization.py # Localization accuracy checker
 └── results/                # Output JSON files
 ```

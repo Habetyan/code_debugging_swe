@@ -150,10 +150,10 @@ class CodeGraph:
             pass
         return callees
 
-    def get_callers(self, func_name: str) -> List[Dict[str, str]]:
+    def get_callers(self, func_name: str) -> List[Dict]:
         """
         Find functions that call func_name.
-        Returns list of {"file": path, "line": line_no, "caller": calling_func_name}
+        Returns list of {"file": str, "line": int, "caller": str}
         """
         callers = []
         

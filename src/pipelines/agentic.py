@@ -224,8 +224,8 @@ def extract_stacktrace_files(text: str) -> List[str]:
             continue
         if '/usr/lib' in m or '/usr/local' in m or '\\Python3' in m:
             continue
-        if '/' in m or '\\\\' in m:
-            normalized = m.replace('\\\\', '/')
+        if '/' in m or '\\' in m:
+            normalized = m.replace('\\', '/')
             parts = normalized.split('/')
             for i, part in enumerate(parts):
                 if part in ['src', 'lib', 'tests', 'sklearn', 'sympy', 'matplotlib', 

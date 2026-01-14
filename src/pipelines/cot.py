@@ -163,8 +163,16 @@ class CoTPipeline(BaselinePipeline):
             d = repo_path / doc_dir
             if d.exists():
                 for f in d.rglob("*.rst"):
-                    try: docs.append(Document(f.read_text()[:2000], f.name, repo_path.name, str(f)))
-                    except: pass
+                    try:
+                        docs.append(Document(
+                            doc_id=str(f),
+                            content=f.read_text()[:2000],
+                            title=f.name,
+                            library=repo_path.name,
+                            source=str(f)
+                        ))
+                    except Exception:
+                        pass
         if not docs: return "No docs."
         corpus = DocumentCorpus()
         [corpus.add(d) for d in docs[:50]]
