@@ -1,3 +1,6 @@
+"""
+Results Converter: Converts experiment result JSONs into submission-ready prediction files.
+"""
 import json
 import argparse
 import sys

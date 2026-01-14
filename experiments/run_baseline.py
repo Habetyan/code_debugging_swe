@@ -1,20 +1,22 @@
-import sys; import os; sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+"""
+Baseline Experiment: Runs the Baseline pipeline on SWE-bench.
+Establishes a lower bound for performance comparison.
+"""
 import argparse
 import sys
 from pathlib import Path
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.data import load_swe_bench_lite, create_stratified_subset
+from src.data import load_swe_bench_dev, create_stratified_subset
 from src.llm import LLMProvider
 from src.pipelines import BaselinePipeline
-from src.evaluation import ExperimentRunner, calculate_pass_at_k
+from src.evaluation import ExperimentRunner
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run baseline experiment on SWE-bench-Lite"
+        description="Run baseline experiment on SWE-bench Full dev split"
     )
     parser.add_argument(
         "--num-instances", "-n",
@@ -55,13 +57,13 @@ def main():
     args = parser.parse_args()
     
     print("=" * 60)
-    print("CoT-RACG Baseline Experiment")
+    print("Baseline Experiment (SWE-bench Full Dev)")
     print("=" * 60)
-    
+
     # Load dataset
-    print("\nLoading SWE-bench-Lite dataset...")
+    print("\nLoading SWE-bench Full dev dataset...")
     try:
-        all_instances = load_swe_bench_lite()
+        all_instances = load_swe_bench_dev()
         print(f"Loaded {len(all_instances)} total instances")
     except Exception as e:
         print(f"Failed to load dataset: {e}")

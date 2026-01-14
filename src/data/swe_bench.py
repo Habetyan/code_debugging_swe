@@ -1,3 +1,7 @@
+"""
+SWE-bench Lite Dataset Loader.
+Provides utilities to load and filter the SWE-bench dataset.
+"""
 from dataclasses import dataclass
 from typing import Optional
 from datasets import load_dataset
@@ -14,6 +18,10 @@ class SWEBenchInstance:
     hints_text: str
     patch: str  # Ground truth patch
     test_patch: str
+    version: str
+    fail_to_pass: str
+    pass_to_pass: str
+    environment_setup_commit: str
     
     @property
     def repo_name(self) -> str:
@@ -21,29 +29,80 @@ class SWEBenchInstance:
         return self.repo.split('/')[-1] if '/' in self.repo else self.repo
 
 
-def load_swe_bench_lite(split: str = "test") -> list[SWEBenchInstance]:
+def load_swe_bench_dataset(
+    dataset_name: str = "princeton-nlp/SWE-bench_Lite",
+    split: str = "test",
+    instance_ids: Optional[list[str]] = None
+) -> list[SWEBenchInstance]:
     """
-    Load SWE-bench-Lite dataset from Hugging Face.
+    Load any SWE-bench dataset from Hugging Face.
     
     Args:
-        split: Dataset split to load ("test" for evaluation)
+        dataset_name: HuggingFace dataset name. Options:
+            - "princeton-nlp/SWE-bench_Lite" (300 instances, test only)
+            - "princeton-nlp/SWE-bench_Verified" (500 instances, test only)
+            - "princeton-nlp/SWE-bench" (full dataset, has train/test splits)
+        split: Dataset split ("test", "train", "dev")
         
     Returns:
         List of SWEBenchInstance objects
     """
-    dataset = load_dataset("princeton-nlp/SWE-bench_Lite", split=split)
+    print(f"Loading dataset: {dataset_name} [{split}]...")
+    dataset = load_dataset(dataset_name, split=split)
     
+    # Filter by instance_ids if provided
+    if instance_ids:
+        dataset = dataset.filter(lambda x: x['instance_id'] in instance_ids)
+        
     instances = []
     for item in dataset:
         instances.append(SWEBenchInstance(
-            instance_id=item["instance_id"],
-            repo=item["repo"],
-            base_commit=item["base_commit"],
-            problem_statement=item["problem_statement"],
-            hints_text=item.get("hints_text", ""),
-            patch=item["patch"],
-            test_patch=item["test_patch"],
+            instance_id=item['instance_id'],
+            repo=item['repo'],
+            base_commit=item['base_commit'],
+            problem_statement=item['problem_statement'],
+            hints_text=item['hints_text'] or "",
+            patch=item['patch'],
+            test_patch=item['test_patch'],
+            version=item.get('version', ''),
+            fail_to_pass=item.get('FAIL_TO_PASS', ''),
+            pass_to_pass=item.get('PASS_TO_PASS', ''),
+            environment_setup_commit=item.get('environment_setup_commit', item['base_commit'])
         ))
+    
+    print(f"Loaded {len(instances)} instances.")
+    return instances
+
+
+def load_swe_bench_verified() -> list[SWEBenchInstance]:
+    """Load SWE-bench Verified (clean eval set, 500 instances)."""
+    return load_swe_bench_dataset("princeton-nlp/SWE-bench_Verified", "test")
+
+
+def load_swe_bench_lite(split: str = "test") -> list[SWEBenchInstance]:
+    """Load SWE-bench Lite (legacy, 300 instances)."""
+    return load_swe_bench_dataset("princeton-nlp/SWE-bench_Lite", split)
+
+
+def load_swe_bench_dev() -> list[SWEBenchInstance]:
+    """Load SWE-bench Full dev split (225 instances)."""
+    return load_swe_bench_dataset("princeton-nlp/SWE-bench", "dev")
+
+
+def load_swe_bench_train(exclude_ids: set[str] = None) -> list[SWEBenchInstance]:
+    """
+    Load the full SWE-bench training set for RAG corpus.
+    Optionally exclude specific instance IDs to prevent data leakage.
+    
+    Args:
+        exclude_ids: Set of instance IDs to exclude (e.g., eval set IDs)
+    """
+    instances = load_swe_bench_dataset("princeton-nlp/SWE-bench", "train")
+    
+    if exclude_ids:
+        before = len(instances)
+        instances = [i for i in instances if i.instance_id not in exclude_ids]
+        print(f"Filtered out {before - len(instances)} instances to prevent leakage.")
     
     return instances
 

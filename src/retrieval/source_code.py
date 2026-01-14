@@ -1,10 +1,8 @@
 import re
 import subprocess
-import tempfile
 import shutil
 from pathlib import Path
 from typing import Optional
-import os
 
 
 class RepoManager:
@@ -69,11 +67,11 @@ class RepoManager:
                     capture_output=True,
                 )
             
-            print(f"✓ Cloned {repo}")
+            print(f"[OK] Cloned {repo}")
             return True
-            
+
         except Exception as e:
-            print(f"✗ Failed to clone {repo}: {e}")
+            print(f"[ERROR] Failed to clone {repo}: {e}")
             if dest.exists():
                 shutil.rmtree(dest)
             return False

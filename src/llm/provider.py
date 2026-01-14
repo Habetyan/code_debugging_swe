@@ -1,3 +1,7 @@
+"""
+LLM Provider: Manages interactions with LLM APIs (OpenRouter, OpenAI).
+Handles API keys, fallback logic, validation, and caching.
+"""
 import os
 import time
 import hashlib
@@ -20,9 +24,11 @@ class LLMProvider:
     
     DEFAULT_MODEL = "deepseek/deepseek-chat"
     FALLBACK_MODELS = [
-        "meta-llama/llama-3-70b-instruct",
-        "mistralai/mistral-7b-instruct",
+        "qwen/qwen-2.5-coder-32b-instruct",  # Strong coding model
+        "deepseek/deepseek-coder",  # Optimized for code
+        "meta-llama/llama-3.1-70b-instruct",  # Good general reasoning
     ]
+
     
     def __init__(
         self,
@@ -100,6 +106,7 @@ class LLMProvider:
         temperature: float = 0.7,
         max_tokens: int = 4096,
         use_cache: bool = True,
+        stop: Optional[list[str]] = None,
     ) -> str:
         """
         Generate a response from the LLM.
@@ -110,12 +117,14 @@ class LLMProvider:
             temperature: Sampling temperature (0-2)
             max_tokens: Maximum tokens in response
             use_cache: Whether to use disk cache
+            stop: Optional list of stop sequences
             
         Returns:
             Generated text response
         """
+        stop_key = str(stop) if stop else ""
         cache_key = self._get_cache_key(
-            f"{system_prompt or ''}|{prompt}",
+            f"{system_prompt or ''}|{prompt}|{stop_key}",
             self.model,
             temperature
         )
@@ -131,57 +140,53 @@ class LLMProvider:
         
         # Try with all API keys first (for the primary model), then fallback models
         last_error = None
-        
-        # First, try all API keys with the primary model
-        while True:
+
+        # Helper function to try API call with retries
+        def try_api_call(model: str) -> Optional[str]:
             for attempt in range(self.max_retries):
                 try:
                     response = self.client.chat.completions.create(
-                        model=self.model,
+                        model=model,
                         messages=messages,
                         temperature=temperature,
                         max_tokens=max_tokens,
+                        stop=stop,
                     )
                     result = response.choices[0].message.content
-                    
+
                     # Cache the result
                     if use_cache:
                         self.cache[cache_key] = result
-                    
+
                     return result
-                    
+
                 except Exception as e:
+                    nonlocal last_error
                     last_error = e
                     error_str = str(e).lower()
-                    
-                    # If it's a credit/payment error, try next API key
+
+                    # If it's a credit/payment error, don't retry this key
                     if '402' in str(e) or 'credit' in error_str or 'payment' in error_str:
                         print(f"[API Key #{self.current_key_index + 1}] Credit limit reached...")
-                        if self._switch_to_next_key():
-                            break  # Retry with new key
-                        else:
-                            # No more keys, try fallback models
-                            break
-                    
+                        return None  # Signal to try next key
+
                     # For other errors, retry with backoff
                     if attempt < self.max_retries - 1:
                         wait_time = 2 ** attempt
                         print(f"API error: {e}. Retrying in {wait_time}s...")
                         time.sleep(wait_time)
-                    else:
-                        # Try next API key
-                        if self._switch_to_next_key():
-                            break
-                        else:
-                            break
-            else:
-                # Inner loop completed without break (success or exhausted retries)
-                continue
-            
-            # Check if we've exhausted all keys
-            if self.current_key_index >= len(self.api_keys):
+
+            return None  # All retries exhausted
+
+        # Try all API keys with the primary model
+        while self.current_key_index < len(self.api_keys):
+            result = try_api_call(self.model)
+            if result:
+                return result
+
+            # Try next API key
+            if not self._switch_to_next_key():
                 break
-            continue
         
         # All API keys exhausted, try fallback models
         for fallback_model in self.FALLBACK_MODELS:
@@ -193,6 +198,7 @@ class LLMProvider:
                         messages=messages,
                         temperature=temperature,
                         max_tokens=max_tokens,
+                        stop=stop,
                     )
                     result = response.choices[0].message.content
                     

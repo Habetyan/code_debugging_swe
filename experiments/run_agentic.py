@@ -1,19 +1,20 @@
 """
-RAG Experiment: Runs the RAG pipeline on SWE-bench.
-Injects retrieved docs/examples and uses fuzzy patching for validation.
+Agentic Experiment: Runs the Agentic pipeline (ReAct loop) on SWE-bench.
+Uses fuzzy patching for validation.
 """
 import argparse
-import sys
+import os
 import subprocess
 import json
+import sys
 from pathlib import Path
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from src.data import load_swe_bench_dev, create_stratified_subset
+from src.data.swe_bench import load_swe_bench_dev, create_stratified_subset
 from src.llm import LLMProvider
-from src.pipelines.rag import RAGPipeline
-from src.evaluation import ExperimentRunner
+from src.pipelines.agentic import AgenticPipeline
+from src.evaluation.runner import ExperimentRunner
 from src.utils.fuzzy_patch import apply_patch_fuzzy
+
 
 def strictify_patch(patch: str, repo: str, base_commit: str) -> str:
     """
@@ -23,24 +24,25 @@ def strictify_patch(patch: str, repo: str, base_commit: str) -> str:
     if not patch.strip():
         return ""
         
-    # Find cached repo
     repo_name = repo.replace('/', '__')
     dir_name = f"{repo_name}__{base_commit[:8]}"
     repo_path = Path('repo_cache') / dir_name
     
     if not repo_path.exists():
-        return ""
+        if not os.path.exists('repo_cache'):
+            return ""
+        cache_dirs = [d for d in os.listdir('repo_cache') if repo_name in d]
+        if not cache_dirs:
+            return ""
+        repo_path = Path('repo_cache') / cache_dirs[0]
     
-    # Reset repo first
     subprocess.run(['git', 'reset', '--hard', 'HEAD'], cwd=repo_path, capture_output=True)
     subprocess.run(['git', 'clean', '-fd'], cwd=repo_path, capture_output=True)
     
-    # Apply fuzzy
     success, msg, files = apply_patch_fuzzy(patch, str(repo_path), threshold=0.6)
     
     strict_patch = ""
     if success and files:
-        # Generate strict diff
         result = subprocess.run(
             ['git', 'diff'], 
             cwd=repo_path, 
@@ -49,66 +51,63 @@ def strictify_patch(patch: str, repo: str, base_commit: str) -> str:
         )
         strict_patch = result.stdout
     
-    # Reset repo again
     subprocess.run(['git', 'reset', '--hard', 'HEAD'], cwd=repo_path, capture_output=True)
     subprocess.run(['git', 'clean', '-fd'], cwd=repo_path, capture_output=True)
     
     return strict_patch
 
-def main():
-    parser = argparse.ArgumentParser(description="Run RAG Experiment (SWE-bench Full Dev)")
-    parser.add_argument("--num-instances", "-n", type=int, default=1, help="Number of instances to run")
-    parser.add_argument("--instance-id", type=str, help="Specific instance ID to run")
-    parser.add_argument("--model", "-m", type=str, default="deepseek/deepseek-chat")
-    parser.add_argument("--temperature", "-t", type=float, default=0.2)
-    parser.add_argument("--experiment-name", "-e", type=str, default="rag_dev")
 
+def main():
+    parser = argparse.ArgumentParser(description="Run Agentic Pipeline (Best Pass@1)")
+    parser.add_argument("--n", "-n", type=int, default=5,
+                        help="Number of instances to run")
+    parser.add_argument("--model", "-m", type=str, default="deepseek/deepseek-chat",
+                        help="Model to use")
+    parser.add_argument("--experiment-name", "-e", type=str, default="agentic_run",
+                        help="Name for the experiment")
+    parser.add_argument("--instance-id", type=str, default=None,
+                        help="Specific instance ID to run (comma-separated for multiple)")
+    parser.add_argument("--temperature", "-t", type=float, default=0.1,
+                        help="LLM temperature (lower is more deterministic)")
     args = parser.parse_args()
 
     print("=" * 60)
-    print("RAG Experiment (SWE-bench Full Dev)")
+    print("Agentic Pipeline (Tool-Use Loop for High Pass@1)")
     print("=" * 60)
 
     # Load dataset
-    print(f"\nLoading dataset...")
-    all_instances = load_swe_bench_dev()
+    print("\nLoading SWE-bench Full dev dataset...")
+    all_dev_instances = load_swe_bench_dev()
 
     # Extract dev IDs for data leakage prevention
-    dev_ids = {inst.instance_id for inst in all_instances}
+    dev_ids = {inst.instance_id for inst in all_dev_instances}
     print(f"Excluding {len(dev_ids)} dev instances from RAG training corpus...")
 
+    # Filter instances
     if args.instance_id:
-        if ',' in args.instance_id:
-            target_ids = args.instance_id.split(',')
-            instances = [i for i in all_instances if i.instance_id in target_ids]
-            print(f"Running {len(instances)} specific instances: {[i.instance_id for i in instances]}")
-        else:
-            instances = [i for i in all_instances if i.instance_id == args.instance_id]
-            if not instances:
-                print(f"[ERROR] Instance {args.instance_id} not found!")
-                return
-            print(f"Running single instance: {instances[0].instance_id}")
+        instance_ids = [x.strip() for x in args.instance_id.split(",")]
+        instances = [i for i in all_dev_instances if i.instance_id in instance_ids]
+        if not instances:
+            print(f"No instances found matching: {args.instance_id}")
+            return
     else:
-        instances = create_stratified_subset(all_instances, n=args.num_instances)
-        print(f"Running {len(instances)} instances")
+        instances = create_stratified_subset(all_dev_instances, n=args.n)
 
-    # Initialize
+    print(f"Running {len(instances)} instances")
+
+    # Initialize LLM
     print(f"\nInitializing LLM provider ({args.model})...")
-    try:
-        llm = LLMProvider(model=args.model)
-    except Exception as e:
-        print(f"[ERROR] Failed to init LLM: {e}")
-        return
+    llm = LLMProvider(model=args.model)
 
-    print("Initializing RAG pipeline...")
-    pipeline = RAGPipeline(
+    print("Initializing Agentic pipeline...")
+    pipeline = AgenticPipeline(
         llm_provider=llm,
         temperature=args.temperature,
         exclude_example_ids=dev_ids,
     )
     
-    # Run
-    print(f"\nRunning experiment...")
+    # Run experiment
+    print("\nRunning experiment...")
     runner = ExperimentRunner(experiment_name=args.experiment_name)
     results = runner.run_baseline_experiment(
         instances=instances,
@@ -116,33 +115,33 @@ def main():
         attempts_per_instance=1,
     )
     
-    # Strictify Patches
-    print(f"\nStrictifying patches for evaluation...")
+    # Strictify patches
+    print("\nStrictifying patches for evaluation...")
     count = 0
     for inst in results['instances']:
         if inst['attempts'] and inst['attempts'][0].get('generated_patch'):
             original_patch = inst['attempts'][0]['generated_patch']
             repo = inst['repo']
-
             base_commit = inst.get('base_commit')
+
             if not base_commit:
                 print(f"[ERROR] Missing base_commit for {inst['instance_id']}, skipping strictification")
                 continue
 
             strict_patch = strictify_patch(original_patch, repo, base_commit)
-
             if strict_patch:
                 inst['attempts'][0]['generated_patch'] = strict_patch
                 count += 1
                 print(f"[OK] Strictified {inst['instance_id']}")
             else:
-                print(f"[WARN] Could not strictify {inst['instance_id']} (Fuzzy apply failed or empty diff)")
+                print(f"[WARN] Could not strictify {inst['instance_id']}")
     
     # Save updated results
     with open(runner.results_file, 'w') as f:
         json.dump(results, f, indent=2)
         
     print(f"\n[SUCCESS] Saved results with strict patches to {runner.results_file}")
+
 
 if __name__ == "__main__":
     main()

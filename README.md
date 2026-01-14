@@ -68,6 +68,18 @@ PYTHONPATH=. python experiments/run_cot.py --instance-id django__django-11099,sc
 | `--n`, `-n` | Number of random instances | 10 |
 | `--model`, `-m` | LLM model to use | `deepseek/deepseek-chat` |
 | `--experiment-name`, `-e` | Name for output file | `cot_run` |
+| `--dataset` | SWE-bench dataset variant | `lite` |
+
+### Available SWE-bench Datasets
+```bash
+# SWE-bench Lite (300 instances, curated for quality)
+PYTHONPATH=. python experiments/run_cot.py --dataset lite --n 10
+
+# SWE-bench Dev (smaller dev set for quick testing)
+PYTHONPATH=. python experiments/run_cot.py --dataset dev --n 5
+```
+
+**Dataset options:** `lite` (default, 300 instances) | `dev` (smaller test set)
 
 ---
 

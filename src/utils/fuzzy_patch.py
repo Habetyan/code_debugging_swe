@@ -1,3 +1,7 @@
+"""
+Fuzzy Patching Utility: Applies patches with fuzzy matching.
+Allows applying patches even when line numbers shifted or context slightly changed.
+"""
 import re
 import difflib
 from dataclasses import dataclass, field
@@ -99,7 +103,7 @@ def fuzzy_find(content_lines: List[str], search_lines: List[str], threshold: flo
     return best_idx, best_ratio
 
 
-def apply_hunk_fuzzy(content: str, hunk: PatchHunk, threshold: float = 0.6) -> Tuple[str, bool]:
+def apply_hunk_fuzzy(content: str, hunk: PatchHunk, threshold: float = 0.85) -> Tuple[str, bool]:
     """Apply a single hunk to content using fuzzy matching."""
     content_lines = content.split('\n')
     
@@ -146,7 +150,7 @@ def resolve_file_path(repo_path: Path, file_path_str: str) -> Optional[Path]:
     return None
 
 
-def apply_patch_fuzzy(patch: str, repo_path: str, threshold: float = 0.6) -> Tuple[bool, str, List[str]]:
+def apply_patch_fuzzy(patch: str, repo_path: str, threshold: float = 0.85) -> Tuple[bool, str, List[str]]:
     """Apply a patch to a repository."""
     hunks = parse_unified_diff(patch)
     if not hunks:

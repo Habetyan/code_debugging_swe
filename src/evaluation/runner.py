@@ -1,7 +1,6 @@
 import json
 from pathlib import Path
 from datetime import datetime
-from dataclasses import asdict
 from tqdm import tqdm
 from typing import Optional
 
@@ -35,29 +34,16 @@ class ExperimentRunner:
         pipeline: Optional[BaselinePipeline] = None,
         attempts_per_instance: int = 3,
         dry_run: bool = False,
+        harness: any = None,
     ) -> dict:
-        """
-        Run baseline experiment on given instances.
-        
-        Args:
-            instances: Bug instances to process
-            pipeline: Optional pre-configured pipeline
-            attempts_per_instance: Number of attempts per instance
-            dry_run: If True, only process first instance partially
-            
-        Returns:
-            Experiment results dict
-        """
-        if pipeline is None:
-            pipeline = BaselinePipeline()
-        
+        """Run the experiment on a list of instances."""
         results = {
             "experiment_name": self.experiment_name,
-            "pipeline_type": "baseline",
+            "pipeline_type": pipeline.__class__.__name__.lower(),
             "config": {
                 "attempts_per_instance": attempts_per_instance,
-                "model": pipeline.llm.model,
-                "temperature": pipeline.temperature,
+                "model": getattr(pipeline.llm, "model", "unknown") if hasattr(pipeline, "llm") else "unknown",
+                "temperature": getattr(pipeline, "temperature", 0.0),
             },
             "timestamp": datetime.now().isoformat(),
             "instances": [],
@@ -71,19 +57,37 @@ class ExperimentRunner:
                 "repo": instance.repo,
                 "base_commit": instance.base_commit,
                 "attempts": [],
+                "verified": False
             }
             
             num_attempts = 1 if dry_run else attempts_per_instance
             
             for attempt_idx in range(num_attempts):
                 result = pipeline.run(instance)
+                
+                # Verify if harness is provided
+                verified = False
+                if harness and result.success and result.generated_patch:
+                    print(f"\n[HARNESS] Verifying patch for {instance.instance_id}...")
+                    try:
+                        verified = harness.verify_patch(instance, result.generated_patch)
+                        if verified:
+                            print(f"[HARNESS] RESOLVED: {instance.instance_id}")
+                        else:
+                            print(f"[HARNESS] FAILED: {instance.instance_id}")
+                    except Exception as e:
+                        print(f"[HARNESS] ERROR: Verification failed: {e}")
+                
                 instance_result["attempts"].append({
                     "attempt": attempt_idx + 1,
                     "success": result.success,
                     "generated_patch": result.generated_patch,
                     "error": result.error,
-                    # Note: ground truth patch not saved to avoid data leakage in logs
+                    "verified": verified
                 })
+                
+                if verified:
+                    instance_result["verified"] = True
             
             results["instances"].append(instance_result)
             

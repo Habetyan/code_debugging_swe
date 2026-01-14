@@ -1,9 +1,14 @@
+"""
+Baseline Pipeline: Simple LLM direct prompting.
+Receives file list + bug report -> Generates patch directly.
+"""
 from dataclasses import dataclass
 from typing import Optional
 from src.data import SWEBenchInstance
 from src.llm import LLMProvider
 
-
+from pathlib import Path
+from src.retrieval.source_code import RepoManager
 SYSTEM_PROMPT = """You are an expert software engineer specializing in debugging and fixing Python code. 
 Your task is to analyze bug reports and generate correct patches to fix the issues.
 
@@ -51,31 +56,40 @@ class PipelineResult:
 
 class BaselinePipeline:
     """
-    Baseline pipeline for bug fixing using direct LLM prompting.
-    No retrieval augmentation - relies solely on LLM's training knowledge.
+    Baseline pipeline: LLM + Repository File List.
+    No advanced retrieval (RAG) or reasoning (CoT), but knows what files exist.
     """
     
     def __init__(
         self,
         llm_provider: Optional[LLMProvider] = None,
+        repo_manager: Optional[RepoManager] = None,  
         temperature: float = 0.7,
         max_tokens: int = 4096,
     ):
         self.llm = llm_provider or LLMProvider()
+        self.repo_manager = repo_manager or RepoManager() 
         self.temperature = temperature
         self.max_tokens = max_tokens
     
+    def _get_file_list(self, repo_path: str) -> str:
+        """Get a flat list of Python files in the repo."""
+        files = []
+        path = Path(repo_path)
+        for p in path.rglob("*.py"):
+            parts = p.relative_to(path).parts
+            # Simple heuristic to exclude tests/docs from baseline view to save context
+            if 'test' not in parts and 'docs' not in parts:
+                files.append(str(p.relative_to(path)))
+        return "\n".join(sorted(files)[:1000]) # Limit to 1000 files
+
     def run(self, instance: SWEBenchInstance) -> PipelineResult:
-        """
-        Run the baseline pipeline on a single bug instance.
-        
-        Args:
-            instance: SWE-bench bug instance
-            
-        Returns:
-            PipelineResult with generated patch and metadata
-        """
+        """Run the baseline pipeline with file structure context."""
         try:
+            # Clone repo to get file list
+            repo_path = self.repo_manager.get_repo_path(instance.repo, instance.base_commit)
+            file_list = self._get_file_list(repo_path)
+            
             # Build the prompt
             hints_section = ""
             if instance.hints_text:
@@ -84,7 +98,7 @@ class BaselinePipeline:
             prompt = FIX_PROMPT_TEMPLATE.format(
                 problem_statement=instance.problem_statement,
                 hints_section=hints_section,
-            )
+            ) + f"\n\n## Repository Files\n{file_list}" # Append file list
             
             # Generate response
             response = self.llm.generate(

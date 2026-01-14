@@ -1,76 +1,93 @@
 
-from typing import Optional, Tuple, List
-from pathlib import Path
-import subprocess
+import difflib
 import re
+from pathlib import Path
+from typing import Optional, List
+from dataclasses import dataclass
 
 from src.data import SWEBenchInstance
 from src.llm import LLMProvider
 from src.retrieval.source_code import RepoManager
 from src.retrieval.example_retriever import ExampleRetriever
-from src.retrieval.indexer import HybridRetriever
 from src.retrieval.corpus import DocumentCorpus, Document
+from src.retrieval.indexer import HybridRetriever
 from src.pipelines.baseline import BaselinePipeline, PipelineResult
+from src.verification.harness import VerificationHarness
 
-
-# Stage 1: Localization Prompt
-LOCALIZATION_SYSTEM_PROMPT = """You are an expert software engineer. Your task is to identify which file needs to be modified to fix a bug.
-
-Think step by step:
-1. What is the bug about? What component/feature is affected?
-2. What kind of code would implement this feature?
-3. Based on the file list, which file is most likely to contain the bug?
-
-Be precise. Output ONLY the file path at the end in the format:
-TARGET_FILE: path/to/file.py
-"""
+LOCALIZATION_SYSTEM_PROMPT = """You are an expert software engineer specializing in bug localization.
+Your task is to identify the SINGLE most likely file that needs to be modified to fix the bug.
+Think step-by-step and explain your reasoning before giving the final answer."""
 
 LOCALIZATION_PROMPT_TEMPLATE = """# Bug Report
 {problem_statement}
 
-# Repository Structure
-Here are the Python files in this repository (showing first 200 most relevant):
-
+# Repository Files
 {file_list}
 
 # Task
-Analyze the bug report and identify which file needs to be modified.
-Think through your reasoning step by step, then output the target file.
+Analyze the bug report and identify the file that needs to be modified.
 
-Remember to end with:
+Think step-by-step:
+1. What component/module does this bug affect? (e.g., validation, parsing, rendering)
+2. What classes, functions, or error messages are mentioned?
+3. If there's a stacktrace, which file appears closest to the actual error?
+4. Which file in the repository implements that functionality?
+
+Based on your analysis, output the file path:
 TARGET_FILE: path/to/file.py
 """
 
-# Stage 2: Fix Generation Prompt (now with RAG context)
-FIX_SYSTEM_PROMPT = """You are an expert software engineer fixing bugs in Python code.
+FIX_SYSTEM_PROMPT = """You are an expert software engineer fixing bugs.
 
-IMPORTANT RULES:
-1. ONLY modify the file specified in the "Primary File" section.
-2. Do NOT invent new files or modify unrelated files.
-3. Ensure your patch is syntactically correct Python.
-4. Keep changes minimal - fix only the bug, don't refactor.
-5. Learn from the similar solved examples provided.
-6. CRITICAL: Analyze the control flow carefully. Do NOT break existing variable updates or logic unless necessary.
-7. Verify your fix ensures the reported bug is solved while maintaining existing functionality.
+IMPORTANT:
+1. Use SEARCH/REPLACE blocks to modify the code.
+2. The SEARCH block must be an EXACT COPY of the lines in the original file (including indentation).
+3. The REPLACE block contains the new code.
+
+FORMAT:
+<<<< SEARCH
+original code lines
+====
+new code lines
+>>>> REPLACE
+"""
+
+RECTIFICATION_SYSTEM_PROMPT = """You are an expert software engineer debugging a failed fix.
+Your previous patch was applied, but the tests failed.
+Analyze the test output and the original code to fix the logic.
 
 OUTPUT FORMAT:
-Provide a Unified Diff (git diff) to fix the issue.
-The file path in the diff MUST match the Primary File path exactly.
-```diff
---- a/path/to/file.py
-+++ b/path/to/file.py
-@@ ... @@
+Provide a NEW SEARCH/REPLACE block to update the file correctly.
+"""
+
+RECTIFICATION_PROMPT_TEMPLATE = """# Original Bug
+{problem_statement}
+
+# Your Previous Fix
+{previous_patch}
+
+# Test Failure Output
+{test_output}
+
+# Primary File Content (With your previous fix applied)
+```python
+{file_content}
 ```
+
+# Instructions
+1. The previous fix failed the tests.
+2. Analyze the failure message.
+3. Generate a new fix using SEARCH/REPLACE blocks.
 """
 
 FIX_PROMPT_TEMPLATE = """# Bug Report
 {problem_statement}
 
-# Similar Solved Bugs (Learn from these examples)
-{examples_content}
-
 # Relevant Documentation
 {doc_context}
+
+# Similar Examples
+{examples_content}
 
 # Primary File: {primary_file}
 ```python
@@ -78,276 +95,248 @@ FIX_PROMPT_TEMPLATE = """# Bug Report
 ```
 
 # Instructions
-1. Study the similar solved bugs above to understand the fix patterns.
-2. Analyze the bug in the Primary File. 
-3. CAREFULLY TRACE the execution flow. Ensure you understand how variables (like indices/counters) are updated.
-4. Generate a minimal fix.
-5. Output a syntactically correct Unified Diff.
+1. Analyze the bug and the file content.
+2. Generate a fix using SEARCH/REPLACE blocks.
+3. CAREFULLY TRACE the execution flow. Ensure you understand how variables are updated.
 """
 
-
-def validate_python_syntax(code: str) -> Tuple[bool, str]:
-    """Validate Python syntax by attempting to compile."""
-    try:
-        compile(code, '<string>', 'exec')
-        return True, ""
-    except SyntaxError as e:
-        return False, f"SyntaxError at line {e.lineno}: {e.msg}"
-
-
 class CoTPipeline(BaselinePipeline):
-    """
-    Chain-of-Thought + RAG Pipeline:
-    1. File Localization with CoT reasoning (LLM-based)
-    2. Few-shot examples from similar bugs (RAG)
-    3. Repository documentation (RAG)
-    4. Fix generation with rich context
-    """
-    
     def __init__(
         self,
         llm_provider: Optional[LLMProvider] = None,
         repo_manager: Optional[RepoManager] = None,
-        temperature: float = 0.2,
+        temperature: float = 0.1,
         max_tokens: int = 4096,
-        max_files_to_show: int = 200,
+        max_files_to_show: int = 300,
         num_examples: int = 2,
-        include_docs: bool = True,
+        exclude_example_ids: Optional[set] = None,
     ):
-        super().__init__(llm_provider, temperature, max_tokens)
-        self.repo_manager = repo_manager or RepoManager()
+        super().__init__(llm_provider, repo_manager, temperature, max_tokens)
         self.max_files_to_show = max_files_to_show
         self.num_examples = num_examples
-        self.include_docs = include_docs
-        
-        # Initialize ExampleRetriever for few-shot learning
         try:
-            self.example_retriever = ExampleRetriever()
+            self.example_retriever = ExampleRetriever(exclude_ids=exclude_example_ids)
         except Exception as e:
             print(f"Warning: Could not initialize ExampleRetriever: {e}")
             self.example_retriever = None
-        
-        # Doc retriever will be initialized per-repo
-        self.doc_retriever = None
-    
-    def _get_python_files(self, repo_path: str) -> List[str]:
-        """Get list of Python files in the repository."""
-        repo_path = Path(repo_path)
+        self.harness = VerificationHarness()
+
+    def _get_python_files(self, repo_path: Path) -> List[str]:
         files = []
-        
-        try:
-            result = subprocess.run(
-                ["find", ".", "-name", "*.py", "-type", "f"],
-                cwd=str(repo_path),
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            if result.returncode == 0:
-                for line in result.stdout.splitlines():
-                    fp = line.lstrip('./')
-                    fp_lower = fp.lower()
-                    if any(x in fp_lower for x in ['test', 'example', 'doc/', 'docs/', '__pycache__', 'conftest']):
-                        continue
-                    files.append(fp)
-        except Exception:
-            for py_file in repo_path.rglob("*.py"):
-                rel_path = str(py_file.relative_to(repo_path))
-                if 'test' not in rel_path.lower():
-                    files.append(rel_path)
-        
-        files.sort(key=lambda x: (x.count('/'), x))
-        return files[:self.max_files_to_show]
-    
-    def _localize_file(self, problem_statement: str, repo_path: str) -> Optional[str]:
-        """Stage 1: Use LLM with Chain-of-Thought to identify the target file."""
+        for py in repo_path.rglob("*.py"):
+            if "test" not in str(py).lower():
+                files.append(str(py.relative_to(repo_path)))
+        return sorted(files)[:self.max_files_to_show]
+
+    def _localize_file(self, problem_statement: str, repo_path: Path) -> Optional[str]:
         files = self._get_python_files(repo_path)
-        if not files:
-            return None
-        
-        file_list = "\n".join(files)
-        
+        if not files: return None
         prompt = LOCALIZATION_PROMPT_TEMPLATE.format(
-            problem_statement=problem_statement[:4000],
-            file_list=file_list
+            problem_statement=problem_statement[:3000],
+            file_list="\n".join(files)
         )
-        
-        response = self.llm.generate(
-            prompt=prompt,
-            system_prompt=LOCALIZATION_SYSTEM_PROMPT,
-            temperature=0.0,
-            max_tokens=1024
-        )
-        
-        match = re.search(r'TARGET_FILE:\s*(.+\.py)', response)
-        if match:
-            target_file = match.group(1).strip()
-            if (Path(repo_path) / target_file).exists():
-                return target_file
-            for f in files:
-                if f.endswith(target_file) or target_file.endswith(f):
-                    return f
-        
-        for f in files:
-            if f in response:
-                return f
-        
-        return None
-    
-    def _extract_repo_docs(self, repo_path: str) -> list:
-        """Extract documentation files from a repository."""
-        repo_path = Path(repo_path)
+        response = self.llm.generate(prompt, LOCALIZATION_SYSTEM_PROMPT, 0.0, 512)
+        # Try multiple patterns for TARGET_FILE extraction
+        patterns = [
+            r'TARGET_FILE:\s*`?([^`\s]+\.py)`?',  # TARGET_FILE: path or TARGET_FILE: `path`
+            r'\*\*TARGET_FILE\*\*:\s*`?([^`\s]+\.py)`?',  # **TARGET_FILE**: path
+            r'TARGET FILE:\s*`?([^`\s]+\.py)`?',  # TARGET FILE: path (no underscore)
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, response, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        # Fallback: look for any .py file mentioned in last 200 chars
+        last_part = response[-200:]
+        py_files = re.findall(r'([a-zA-Z_/]+\.py)', last_part)
+        if py_files:
+            # Check if it's in our file list
+            for pf in py_files:
+                if pf in files or any(f.endswith(pf) for f in files):
+                    return pf
+        return files[0] if files else None
+
+    def _get_doc_context(self, problem_statement: str, repo_path: Path) -> str:
+        # Simplified doc retrieval
         docs = []
-        
-        doc_dirs = ['doc', 'docs', 'documentation']
-        doc_extensions = ['.rst', '.md', '.txt']
-        
-        for doc_dir in doc_dirs:
-            dir_path = repo_path / doc_dir
-            if dir_path.exists() and dir_path.is_dir():
-                for ext in doc_extensions:
-                    for doc_file in list(dir_path.rglob(f'*{ext}'))[:50]:
-                        try:
-                            content = doc_file.read_text(errors='ignore')[:2000]
-                            docs.append(Document(
-                                content=content,
-                                title=doc_file.name,
-                                library=repo_path.name,
-                                source=str(doc_file.relative_to(repo_path))
-                            ))
-                        except Exception:
-                            continue
-        
-        return docs
-    
-    def _get_doc_context(self, problem_statement: str, repo_path: str) -> str:
-        """Retrieve relevant documentation for the problem."""
-        if not self.include_docs:
-            return "No documentation available."
-        
-        repo_docs = self._extract_repo_docs(repo_path)
-        if not repo_docs:
-            return "No documentation found in repository."
-        
-        # Build a corpus and index
+        for doc_dir in ['doc', 'docs']:
+            d = repo_path / doc_dir
+            if d.exists():
+                for f in d.rglob("*.rst"):
+                    try: docs.append(Document(f.read_text()[:2000], f.name, repo_path.name, str(f)))
+                    except: pass
+        if not docs: return "No docs."
         corpus = DocumentCorpus()
-        for doc in repo_docs:
-            corpus.add(doc)
-        
+        [corpus.add(d) for d in docs[:50]]
         try:
             retriever = HybridRetriever(corpus)
-            results = retriever.search(problem_statement, top_k=3)
-            
-            doc_parts = []
-            for doc, score in results:
-                doc_parts.append(f"## {doc.title}\n{doc.content[:500]}...")
-            
-            return "\n\n".join(doc_parts) if doc_parts else "No relevant documentation found."
-        except Exception as e:
-            return f"Documentation retrieval failed: {e}"
-    
-    def _get_examples_context(self, problem_statement: str, repo: str) -> str:
-        """Retrieve similar solved bug examples."""
-        if not self.example_retriever:
-            return "No examples available."
-        
-        try:
-            examples = self.example_retriever.retrieve(
-                problem_statement=problem_statement,
-                repo=repo,
-                top_k=self.num_examples
-            )
-            
-            if not examples:
-                return "No similar solved bugs found."
-            
-            parts = []
-            for i, ex in enumerate(examples, 1):
-                parts.append(f"""## Example {i}: {ex['instance_id']}
-**Problem:** {ex['problem_statement'][:300]}...
+            hits = retriever.search(problem_statement, top_k=2)
+            return "\n".join([f"## {h[0].title}\n{h[0].content[:500]}..." for h in hits])
+        except: return "Retrieval failed."
 
-**Solution (Patch):**
-```diff
-{ex['patch'][:800]}
-```
-""")
-            
-            return "\n".join(parts)
-        except Exception as e:
-            return f"Example retrieval failed: {e}"
-    
-    def _generate_fix(self, problem_statement: str, primary_file: str, 
-                      primary_content: str, examples_content: str, doc_context: str) -> str:
-        """Stage 2: Generate the fix with RAG context."""
-        prompt = FIX_PROMPT_TEMPLATE.format(
-            problem_statement=problem_statement,
-            examples_content=examples_content,
-            doc_context=doc_context,
-            primary_file=primary_file,
-            primary_content=primary_content[:30000]  # Increase limit to 30k
+    def _apply_search_replace(self, content: str, response: str) -> str:
+        """Apply SEARCH/REPLACE blocks with robust matching."""
+        pattern = r"<{4,}\s*SEARCH\s*\n(.*?)\n={4,}\s*\n(.*?)\n>{4,}\s*REPLACE"
+        matches = list(re.finditer(pattern, response, re.DOTALL))
+        if not matches:
+            return content
+
+        for m in matches:
+            search_block = m.group(1)
+            replace_block = m.group(2)
+
+            # 1. Exact match (best case)
+            if search_block in content:
+                content = content.replace(search_block, replace_block, 1)
+                continue
+
+            # 2. Try stripping both sides
+            search_stripped = search_block.strip()
+            if search_stripped and search_stripped in content:
+                idx = content.find(search_stripped)
+                if idx >= 0:
+                    content = content[:idx] + replace_block.strip() + content[idx + len(search_stripped):]
+                    continue
+
+            # 3. Fuzzy block matching using SequenceMatcher (improved)
+            if not search_stripped:
+                continue
+            search_lines = search_block.splitlines()
+            if len(search_lines) < 1:
+                continue
+
+            content_lines = content.splitlines(keepends=True)
+            best_match_idx = -1
+            best_match_ratio = 0.0
+
+            # Slide window over content to find best matching block
+            for i in range(len(content_lines) - len(search_lines) + 1):
+                candidate_block = ''.join(content_lines[i:i + len(search_lines)])
+                ratio = difflib.SequenceMatcher(None, search_block, candidate_block).ratio()
+                if ratio > best_match_ratio:
+                    best_match_ratio = ratio
+                    best_match_idx = i
+                # Early exit on near-perfect match
+                if ratio > 0.98:
+                    break
+
+            # Only apply if match quality is high enough (85% threshold)
+            if best_match_idx >= 0 and best_match_ratio >= 0.85:
+                before = ''.join(content_lines[:best_match_idx])
+                after = ''.join(content_lines[best_match_idx + len(search_lines):])
+                # Preserve trailing newline consistency
+                if replace_block and not replace_block.endswith('\n'):
+                    replace_block += '\n'
+                content = before + replace_block + after
+
+        return content
+
+    def _rectify_logic_failure(self, instance, previous_patch: str, test_output: str, file_content: str) -> str:
+        """
+        Self-correcting loop: Ask LLM to fix the logic based on test failures.
+        """
+        prompt = RECTIFICATION_PROMPT_TEMPLATE.format(
+            problem_statement=instance.problem_statement,
+            previous_patch=previous_patch,
+            test_output=test_output[:5000],
+            file_content=file_content[:20000]
         )
-        
-        response = self.llm.generate(
-            prompt=prompt,
-            system_prompt=FIX_SYSTEM_PROMPT + "\n\nCRITICAL: Ensure your diff produces valid Python syntax. Do not leave 'try' blocks without 'except'/'finally'.",
-            temperature=self.temperature,
-            max_tokens=self.max_tokens
-        )
-        
-        return response
-    
+
+        new_response = self.llm.generate(prompt, RECTIFICATION_SYSTEM_PROMPT, self.temperature, self.max_tokens)
+        return self._apply_search_replace(file_content, new_response)
+
     def run(self, instance: SWEBenchInstance) -> PipelineResult:
-        """Run the CoT + RAG pipeline."""
-        
-        # 1. Clone Repo
         repo_path = self.repo_manager.get_repo_path(instance.repo, instance.base_commit)
+        target_file = self._localize_file(instance.problem_statement, repo_path)
         
-        # 2. Stage 1: Localization with CoT
-        primary_file = self._localize_file(instance.problem_statement, repo_path)
-        
-        if not primary_file:
-            return PipelineResult(
-                instance_id=instance.instance_id,
-                generated_patch="",
-                ground_truth_patch=instance.patch,
-                raw_response="Could not localize target file",
-                success=False,
-                error="Localization failed"
-            )
-        
-        # 3. Read primary file content
-        try:
-            primary_content = (Path(repo_path) / primary_file).read_text()
-        except Exception as e:
-            return PipelineResult(
-                instance_id=instance.instance_id,
-                generated_patch="",
-                ground_truth_patch=instance.patch,
-                raw_response=str(e),
-                success=False,
-                error=f"Could not read file: {primary_file}"
-            )
-        
-        # 4. Get RAG context
-        examples_content = self._get_examples_context(instance.problem_statement, instance.repo)
-        doc_context = self._get_doc_context(instance.problem_statement, repo_path)
-        
-        # 5. Stage 2: Generate Fix with RAG context
-        response = self._generate_fix(
-            instance.problem_statement, 
-            primary_file, 
-            primary_content,
-            examples_content,
-            doc_context
+        if not target_file or not (repo_path / target_file).exists():
+             return PipelineResult(instance.instance_id, "", instance.patch, "", False, "Localization failed")
+
+        primary_content = (repo_path / target_file).read_text()
+
+        # RAG Context (no per-instance doc extraction to avoid data leakage)
+        doc_context = "No documentation available."
+        examples_context = ""
+        if self.example_retriever:
+             exs = self.example_retriever.retrieve(instance.problem_statement, instance.repo, 2)
+             examples_context = "\n".join([f"Example: {e['instance_id']}\n{e['patch'][:500]}" for e in exs])
+
+        prompt = FIX_PROMPT_TEMPLATE.format(
+            problem_statement=instance.problem_statement,
+            doc_context=doc_context,
+            examples_content=examples_context,
+            primary_file=target_file,
+            primary_content=primary_content[:50000]
         )
+
+        response = self.llm.generate(prompt, FIX_SYSTEM_PROMPT, self.temperature, self.max_tokens)
         
-        # 6. Extract patch
-        generated_patch = self._extract_patch(response)
+        # Apply Initial Patch
+        new_content = self._apply_search_replace(primary_content, response)
         
+        # Generate Diff
+        def get_diff(orig, new, fname):
+            diff_lines = difflib.unified_diff(
+                orig.splitlines(keepends=True),
+                new.splitlines(keepends=True),
+                fromfile=f"a/{fname}",
+                tofile=f"b/{fname}"
+            )
+            return "".join(diff_lines)
+
+        patch = get_diff(primary_content, new_content, target_file)
+
+        # ---- VERIFICATION LOOP WITH RE-VERIFICATION ----
+        max_rectification_attempts = 2
+        verified_success = False
+
+        if patch:
+            print(f"  [CoT] Verifying initial patch...")
+            success, logs = self.harness.verify_patch_with_logs(instance, patch)
+
+            if success:
+                verified_success = True
+                print(f"  [CoT] Initial patch verified successfully!")
+            else:
+                # Rectification loop with re-verification
+                current_content = new_content
+                current_patch = patch
+
+                for attempt in range(max_rectification_attempts):
+                    print(f"  [CoT] Verification failed. Rectification attempt {attempt + 1}/{max_rectification_attempts}...")
+
+                    rectified_content = self._rectify_logic_failure(
+                        instance, current_patch, logs, current_content
+                    )
+                    rectified_patch = get_diff(primary_content, rectified_content, target_file)
+
+                    if not rectified_patch:
+                        print(f"  [CoT] Rectification produced empty patch, keeping previous.")
+                        break
+
+                    # Re-verify the rectified patch
+                    print(f"  [CoT] Re-verifying rectified patch...")
+                    success, logs = self.harness.verify_patch_with_logs(instance, rectified_patch)
+
+                    if success:
+                        verified_success = True
+                        patch = rectified_patch
+                        new_content = rectified_content
+                        print(f"  [CoT] Rectified patch verified successfully!")
+                        break
+
+                    # Update for next iteration
+                    current_content = rectified_content
+                    current_patch = rectified_patch
+
+                if not verified_success:
+                    print(f"  [CoT] All rectification attempts failed. Returning best effort patch.")
+                    patch = current_patch
+
         return PipelineResult(
             instance_id=instance.instance_id,
-            generated_patch=generated_patch,
+            generated_patch=patch,
             ground_truth_patch=instance.patch,
             raw_response=response,
-            success=True
+            success=verified_success
         )

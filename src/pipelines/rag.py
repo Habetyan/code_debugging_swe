@@ -1,3 +1,7 @@
+"""
+RAG Pipeline: Retrieval-Augmented Generation.
+Injects Source Code + Documentation + Solved Examples into the prompt context to help LLM generate patches.
+"""
 from typing import Optional, Tuple, List
 from pathlib import Path
 import subprocess
@@ -8,9 +12,9 @@ import shutil
 from src.data import SWEBenchInstance
 from src.llm import LLMProvider
 from src.retrieval import HybridRetriever
-from src.retrieval.source_code import RepoManager, extract_file_paths, get_source_context
+from src.retrieval.source_code import RepoManager, extract_file_paths
 from src.retrieval.graph import CodeGraph
-from src.retrieval.corpus import create_sample_corpus
+from src.retrieval.corpus import DocumentCorpus
 from src.retrieval.example_retriever import ExampleRetriever
 from .baseline import BaselinePipeline, PipelineResult
 
@@ -163,24 +167,37 @@ class RAGPipeline(BaselinePipeline):
         max_tokens: int = 4096,
         include_docs: bool = True,
         max_syntax_retries: int = 2,
+        exclude_example_ids: Optional[set] = None,
     ):
-        super().__init__(llm_provider, temperature, max_tokens)
-        
+        super().__init__(
+            llm_provider=llm_provider,
+            repo_manager=repo_manager,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
+
         self.repo_manager = repo_manager or RepoManager()
         self.include_docs = include_docs
         self.max_syntax_retries = max_syntax_retries
-        
+
         if include_docs:
             if retriever is None:
-                # Start with sample corpus, will be replaced per-instance
-                corpus = create_sample_corpus()
-                self.retriever = HybridRetriever(corpus)
+                # Load pre-built corpus only (no per-instance extraction to avoid data leakage)
+                corpus_path = Path("cache/expanded_corpus.json")
+                if corpus_path.exists():
+                    corpus = DocumentCorpus(corpus_path)
+                    self.retriever = HybridRetriever(corpus)
+                    print(f"Loaded pre-built corpus from {corpus_path}")
+                else:
+                    # No corpus available - disable doc retrieval
+                    print("Warning: No pre-built corpus found. Doc retrieval disabled.")
+                    self.retriever = None
             else:
                 self.retriever = retriever
-            
+
             # Initialize Example Retriever (Few-Shot RAG)
             try:
-                self.example_retriever = ExampleRetriever()
+                self.example_retriever = ExampleRetriever(exclude_ids=exclude_example_ids)
             except Exception as e:
                 print(f"Warning: Could not init ExampleRetriever: {e}")
                 self.example_retriever = None
@@ -374,25 +391,17 @@ class RAGPipeline(BaselinePipeline):
             return False, str(e)
 
     def run(self, instance: SWEBenchInstance) -> PipelineResult:
-        # 1. Clone Repo
+        """
+        Executes the RAG pipeline for a given SWEBench instance.
+
+        Args:
+            instance (SWEBenchInstance): The SWEBench instance containing problem details.
+
+        Returns:
+            PipelineResult: The result of the pipeline execution, including the generated patch.
+        """
+        # 1. Cloning Repo
         repo_path = self.repo_manager.get_repo_path(instance.repo, instance.base_commit)
-        
-        # 1.5. Index actual repo documentation (if RAG is enabled)
-        if self.retriever and self.include_docs:
-            repo_docs = self._extract_repo_docs(repo_path)
-            
-            if repo_docs:
-                # Re-index with actual docs
-                from src.retrieval.corpus import DocumentCorpus, Document
-                
-                corpus = DocumentCorpus()
-                
-                # Add repo docs
-                for doc in repo_docs:
-                    corpus.add(doc)
-                    
-                # Rebuild the retriever with new corpus
-                self.retriever = HybridRetriever(corpus)
         
         # 2. Identify Primary File (using multiple strategies)
         primary_file = self._find_primary_file(instance.problem_statement, repo_path)
@@ -438,7 +447,7 @@ class RAGPipeline(BaselinePipeline):
         examples_content = "No similar examples found."
         if self.example_retriever:
             try:
-                examples = self.example_retriever.retrieve(instance.problem_statement, instance.repo_name, k=2)
+                examples = self.example_retriever.retrieve(instance.problem_statement, instance.repo, k=2)
                 if examples:
                     examples_content = ""
                     for i, ex in enumerate(examples):

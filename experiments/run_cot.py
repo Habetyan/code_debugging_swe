@@ -1,14 +1,15 @@
+"""
+CoT Experiment: Runs the Chain-of-Thought pipeline on SWE-bench.
+Uses fuzzy patching to validate/strictify patches before submission.
+"""
 import argparse
 import os
 import subprocess
 import json
 import sys
 from pathlib import Path
-
-# Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from src.data.swe_bench import load_swe_bench_lite, create_stratified_subset
+from src.data.swe_bench import load_swe_bench_dev, create_stratified_subset
 from src.llm import LLMProvider
 from src.pipelines.cot import CoTPipeline
 from src.evaluation.runner import ExperimentRunner
@@ -29,14 +30,7 @@ def strictify_patch(patch: str, repo: str, base_commit: str) -> str:
     repo_path = Path('repo_cache') / dir_name
     
     if not repo_path.exists():
-        # Fallback: try finding any dir with repo name if specific commit not found 
-        # (though this should ideally not happen if pipeline just ran)
-        if not os.path.exists('repo_cache'):
-            return ""
-        cache_dirs = [d for d in os.listdir('repo_cache') if repo_name in d]
-        if not cache_dirs:
-            return ""
-        repo_path = Path('repo_cache') / cache_dirs[0]
+        return ""
     
     # Reset repo first
     subprocess.run(['git', 'reset', '--hard', 'HEAD'], cwd=repo_path, capture_output=True)
@@ -64,12 +58,12 @@ def strictify_patch(patch: str, repo: str, base_commit: str) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run CoT Pipeline Experiment")
+    parser = argparse.ArgumentParser(description="Run CoT Pipeline Experiment (SWE-bench Full Dev)")
     parser.add_argument("--n", "-n", type=int, default=10,
                         help="Number of instances to run")
     parser.add_argument("--model", "-m", type=str, default="deepseek/deepseek-chat",
                         help="Model to use")
-    parser.add_argument("--experiment-name", "-e", type=str, default="cot_run",
+    parser.add_argument("--experiment-name", "-e", type=str, default="cot_dev",
                         help="Name for the experiment")
     parser.add_argument("--instance-id", type=str, default=None,
                         help="Specific instance ID to run (comma-separated for multiple)")
@@ -78,34 +72,39 @@ def main():
     args = parser.parse_args()
 
     print("=" * 60)
-    print("CoT Pipeline Experiment (Two-Stage: Localize + Fix)")
+    print("CoT Pipeline Experiment (SWE-bench Full Dev)")
     print("=" * 60)
-    
+
     # Load dataset
-    print("\nLoading dataset...")
-    instances = load_swe_bench_lite()
-    
+    print("\nLoading SWE-bench Full dev dataset...")
+    all_dev_instances = load_swe_bench_dev()
+
+    # Extract dev IDs for data leakage prevention
+    dev_ids = {inst.instance_id for inst in all_dev_instances}
+    print(f"Excluding {len(dev_ids)} dev instances from RAG training corpus...")
+
     # Filter instances
     if args.instance_id:
         instance_ids = [x.strip() for x in args.instance_id.split(",")]
-        instances = [i for i in instances if i.instance_id in instance_ids]
+        instances = [i for i in all_dev_instances if i.instance_id in instance_ids]
         if not instances:
             print(f"No instances found matching: {args.instance_id}")
             return
     else:
-        instances = create_stratified_subset(instances, n=args.n)
-    
+        instances = create_stratified_subset(all_dev_instances, n=args.n)
+
     print(f"Running {len(instances)} instances")
-    
+
     # Initialize LLM
     print(f"\nInitializing LLM provider ({args.model})...")
     llm = LLMProvider(model=args.model)
-    
+
     # Initialize CoT Pipeline
     print("Initializing CoT pipeline...")
     pipeline = CoTPipeline(
         llm_provider=llm,
         temperature=args.temperature,
+        exclude_example_ids=dev_ids,
     )
     
     # Run experiment
@@ -125,11 +124,14 @@ def main():
         if inst['attempts'] and inst['attempts'][0].get('generated_patch'):
             original_patch = inst['attempts'][0]['generated_patch']
             repo = inst['repo']
-            
-            base_commit = inst['base_commit']
-            
+
+            base_commit = inst.get('base_commit')
+            if not base_commit:
+                print(f"[ERROR] Missing base_commit for {inst['instance_id']}, skipping strictification")
+                continue
+
             strict_patch = strictify_patch(original_patch, repo, base_commit)
-            
+
             if strict_patch:
                 inst['attempts'][0]['generated_patch'] = strict_patch
                 count += 1
