@@ -9,7 +9,7 @@ import json
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from src.data.swe_bench import load_swe_bench_dev, create_stratified_subset
+from src.data.swe_bench import load_swe_bench_dataset, load_swe_bench_lite, create_stratified_subset
 from src.llm import LLMProvider
 from src.pipelines.agentic import AgenticPipeline
 from src.evaluation.runner import ExperimentRunner
@@ -69,6 +69,11 @@ def main():
                         help="Specific instance ID to run (comma-separated for multiple)")
     parser.add_argument("--temperature", "-t", type=float, default=0.1,
                         help="LLM temperature (lower is more deterministic)")
+    parser.add_argument("--dataset", "-d", type=str, default="lite",
+                        choices=["lite", "dev"],
+                        help="Dataset to use: lite (has working docker images) or dev")
+    parser.add_argument("--split", "-s", type=str, default=None,
+                        help="Dataset split (lite: test/dev, dev: dev). Default: test for lite, dev for dev")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -76,22 +81,30 @@ def main():
     print("=" * 60)
 
     # Load dataset
-    print("\nLoading SWE-bench Full dev dataset...")
-    all_dev_instances = load_swe_bench_dev()
+    if args.dataset == "lite":
+        split = args.split or "test"  # default to test for lite
+        print(f"\nLoading SWE-bench Lite dataset [{split}]...")
+        all_instances = load_swe_bench_lite(split=split)
+        dataset_name = "princeton-nlp/SWE-bench_Lite"
+    else:
+        split = args.split or "dev"  # default to dev for full
+        print(f"\nLoading SWE-bench Full dataset [{split}]...")
+        all_instances = load_swe_bench_dataset("princeton-nlp/SWE-bench", split=split)
+        dataset_name = "princeton-nlp/SWE-bench"
 
-    # Extract dev IDs for data leakage prevention
-    dev_ids = {inst.instance_id for inst in all_dev_instances}
-    print(f"Excluding {len(dev_ids)} dev instances from RAG training corpus...")
+    # Extract IDs for data leakage prevention
+    exclude_ids = {inst.instance_id for inst in all_instances}
+    print(f"Excluding {len(exclude_ids)} instances from RAG training corpus...")
 
     # Filter instances
     if args.instance_id:
         instance_ids = [x.strip() for x in args.instance_id.split(",")]
-        instances = [i for i in all_dev_instances if i.instance_id in instance_ids]
+        instances = [i for i in all_instances if i.instance_id in instance_ids]
         if not instances:
             print(f"No instances found matching: {args.instance_id}")
             return
     else:
-        instances = create_stratified_subset(all_dev_instances, n=args.n)
+        instances = create_stratified_subset(all_instances, n=args.n)
 
     print(f"Running {len(instances)} instances")
 
@@ -103,7 +116,9 @@ def main():
     pipeline = AgenticPipeline(
         llm_provider=llm,
         temperature=args.temperature,
-        exclude_example_ids=dev_ids,
+        exclude_example_ids=exclude_ids,
+        harness_dataset=dataset_name,
+        harness_split=split,
     )
     
     # Run experiment

@@ -2,9 +2,8 @@
 Fuzzy Patching Utility: Applies patches with fuzzy matching.
 Allows applying patches even when line numbers shifted or context slightly changed.
 """
-import re
 import difflib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Tuple
 
@@ -104,33 +103,49 @@ def fuzzy_find(content_lines: List[str], search_lines: List[str], threshold: flo
 
 
 def apply_hunk_fuzzy(content: str, hunk: PatchHunk, threshold: float = 0.85) -> Tuple[str, bool]:
-    """Apply a single hunk to content using fuzzy matching."""
+    """Apply a single hunk to content using fuzzy matching.
+
+    Properly transforms lines by:
+    1. Finding the source block (context + deletions) in the file
+    2. Replacing it with target block (context + additions) at correct positions
+    3. Preserving line-by-line correspondence
+    """
     content_lines = content.split('\n')
-    
-    # 1. Build source block (lines to look for)
+
+    # 1. Build source block (lines to look for: context + deletions)
     source_lines = [line.content for line in hunk.lines if line.type in (' ', '-')]
-    
-    # 2. Build target block (lines to replace with)
-    target_lines = [line.content for line in hunk.lines if line.type in (' ', '+')]
-    
-    # 3. Handle specific case: Addition only (no context)
+
+    # 2. Handle edge case: Pure addition (no source to find)
     if not source_lines:
         # Append to end if no context (rare for valid unified diffs)
+        target_lines = [line.content for line in hunk.lines if line.type == '+']
         return content + '\n' + '\n'.join(target_lines), True
 
-    # 4. Find location
+    # 3. Find location using fuzzy matching
     match_idx, ratio = fuzzy_find(content_lines, source_lines, threshold)
-    
-    if match_idx is not None and ratio >= threshold:
-        # 5. Apply replacement
-        new_lines = (
-            content_lines[:match_idx] +
-            target_lines +
-            content_lines[match_idx + len(source_lines):]
-        )
-        return '\n'.join(new_lines), True
-        
-    return content, False
+
+    if match_idx is None or ratio < threshold:
+        return content, False
+
+    # 4. Build target block by transforming line-by-line
+    # This preserves the structure while applying add/remove operations
+    target_lines = []
+    for line in hunk.lines:
+        if line.type == ' ':
+            # Context: keep as-is
+            target_lines.append(line.content)
+        elif line.type == '+':
+            # Addition: include in output
+            target_lines.append(line.content)
+        # line.type == '-': Deletion, skip (don't include in target)
+
+    # 5. Apply replacement
+    new_lines = (
+        content_lines[:match_idx] +
+        target_lines +
+        content_lines[match_idx + len(source_lines):]
+    )
+    return '\n'.join(new_lines), True
 
 
 def resolve_file_path(repo_path: Path, file_path_str: str) -> Optional[Path]:
@@ -151,44 +166,52 @@ def resolve_file_path(repo_path: Path, file_path_str: str) -> Optional[Path]:
 
 
 def apply_patch_fuzzy(patch: str, repo_path: str, threshold: float = 0.85) -> Tuple[bool, str, List[str]]:
-    """Apply a patch to a repository."""
+    """Apply a patch to a repository with proper sequential hunk handling.
+
+    When multiple hunks modify the same file, they are applied in sequence.
+    Each successful hunk application updates the content for the next hunk.
+    This naturally handles offset changes from earlier hunks via fuzzy matching.
+    """
     hunks = parse_unified_diff(patch)
     if not hunks:
         return False, "No hunks parsed", []
-        
+
     files_modified = []
     messages = []
     all_success = True
-    
+
     # Group hunks by file to apply sequentially
     from collections import defaultdict
     hunks_by_file = defaultdict(list)
     for hunk in hunks:
         hunks_by_file[hunk.file_path].append(hunk)
-        
+
     for file_path_str, file_hunks in hunks_by_file.items():
         file_path = resolve_file_path(Path(repo_path), file_path_str)
-        
+
         if not file_path:
             messages.append(f"File not found: {file_path_str}")
             all_success = False
             continue
-            
+
         content = file_path.read_text()
         original_content = content
         file_success = True
-        
-        for hunk in file_hunks:
+
+        # Apply hunks sequentially - each hunk works on the result of the previous one
+        # Fuzzy matching handles any line shifts from earlier hunks automatically
+        for i, hunk in enumerate(file_hunks):
             content, success = apply_hunk_fuzzy(content, hunk, threshold)
             if not success:
                 file_success = False
-                messages.append(f"Failed hunk in {file_path_str}")
+                messages.append(f"Failed hunk {i+1}/{len(file_hunks)} in {file_path_str}")
                 break
-        
+
         if file_success and content != original_content:
             file_path.write_text(content)
             files_modified.append(str(file_path.relative_to(repo_path)))
+            messages.append(f"Successfully applied {len(file_hunks)} hunk(s) to {file_path_str}")
         elif not file_success:
             all_success = False
-            
+
     return all_success, '\n'.join(messages), files_modified
