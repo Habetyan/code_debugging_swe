@@ -90,18 +90,22 @@ class CodeGraph:
                 # Absolute import
                 if node.module:
                     parts = node.module.split('.')
-                    # Try to match top-level directories in repo
-                    candidate = self.repo_path.joinpath(*parts).with_suffix('.py')
-                    if candidate.exists():
-                        try:
-                            resolved.add(str(candidate.relative_to(self.repo_path)))
-                        except ValueError: pass
-                    
-                    candidate_dir = self.repo_path.joinpath(*parts) / "__init__.py"
-                    if candidate_dir.exists():
-                        try:
-                            resolved.add(str(candidate_dir.relative_to(self.repo_path)))
-                        except ValueError: pass
+                    # Try to match with various prefixes (src/, lib/, or root)
+                    for prefix in ['', 'src/', 'lib/']:
+                        base = self.repo_path / prefix if prefix else self.repo_path
+                        candidate = base.joinpath(*parts).with_suffix('.py')
+                        if candidate.exists():
+                            try:
+                                resolved.add(str(candidate.relative_to(self.repo_path)))
+                            except ValueError: pass
+                            break
+
+                        candidate_dir = base.joinpath(*parts) / "__init__.py"
+                        if candidate_dir.exists():
+                            try:
+                                resolved.add(str(candidate_dir.relative_to(self.repo_path)))
+                            except ValueError: pass
+                            break
 
         elif isinstance(node, ast.Import):
             for alias in node.names:

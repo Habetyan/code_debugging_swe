@@ -15,11 +15,15 @@ class VerificationHarness:
     """
     Wrapper around official SWE-bench harness for verifying patches.
     """
-    
-    def __init__(self, output_dir: str = "verification_results"):
+
+    def __init__(self, output_dir: str = "verification_results",
+                 dataset_name: str = "princeton-nlp/SWE-bench",
+                 split: str = "dev"):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        
+        self.dataset_name = dataset_name
+        self.split = split
+
     def verify_patch(self, instance, patch: str) -> bool:
         success, _ = self.verify_patch_with_logs(instance, patch)
         return success
@@ -36,20 +40,19 @@ class VerificationHarness:
                 "instance_id": instance.instance_id
             }
         }
-        
+
         run_id = f"verify_{instance.instance_id}_{int(time.time())}"
         pred_file = self.output_dir / f"{run_id}_pred.json"
-        
+
         with open(pred_file, "w") as f:
             json.dump(pred_data, f)
-            
-        dataset_name = "princeton-nlp/SWE-bench_Lite"
+
         report_dir = self.output_dir / "reports"
-        
+
         cmd = [
             sys.executable, "-m", "swebench.harness.run_evaluation",
-            "--dataset_name", dataset_name,
-            "--split", "test",
+            "--dataset_name", self.dataset_name,
+            "--split", self.split,
             "--instance_ids", instance.instance_id,
             "--predictions_path", str(pred_file),
             "--max_workers", "1",

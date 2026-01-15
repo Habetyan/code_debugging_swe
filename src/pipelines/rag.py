@@ -402,7 +402,18 @@ class RAGPipeline(BaselinePipeline):
         """
         # 1. Cloning Repo
         repo_path = self.repo_manager.get_repo_path(instance.repo, instance.base_commit)
-        
+
+        # Check if clone failed
+        if repo_path is None:
+            print(f"[ERROR] Failed to clone repo for {instance.instance_id}")
+            return PipelineResult(
+                instance_id=instance.instance_id,
+                generated_patch="",
+                ground_truth_patch=instance.patch,
+                raw_response="ERROR: Failed to clone repository",
+                success=False
+            )
+
         # 2. Identify Primary File (using multiple strategies)
         primary_file = self._find_primary_file(instance.problem_statement, repo_path)
         

@@ -1,5 +1,5 @@
 """
-RAG Experiment: Runs the RAG pipeline on SWE-bench.
+RAG Experiment on Training Set: Runs the RAG pipeline on SWE-bench training data (19,008 instances).
 Injects retrieved docs/examples and uses fuzzy patching for validation.
 """
 import argparse
@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from src.data import load_swe_bench_dev, create_stratified_subset
+from src.data import load_swe_bench_train, create_stratified_subset
 from src.llm import LLMProvider
 from src.pipelines.rag import RAGPipeline
 from src.evaluation import ExperimentRunner
@@ -17,65 +17,65 @@ from src.utils.fuzzy_patch import apply_patch_fuzzy
 
 def strictify_patch(patch: str, repo: str, base_commit: str) -> str:
     """
-    Converts a fuzzy patch to a strict git diff by applying it fuzzily 
+    Converts a fuzzy patch to a strict git diff by applying it fuzzily
     to a cached repo and then running git diff.
     """
     if not patch.strip():
         return ""
-        
+
     # Find cached repo
     repo_name = repo.replace('/', '__')
     dir_name = f"{repo_name}__{base_commit[:8]}"
     repo_path = Path('repo_cache') / dir_name
-    
+
     if not repo_path.exists():
         return ""
-    
+
     # Reset repo first
     subprocess.run(['git', 'reset', '--hard', 'HEAD'], cwd=repo_path, capture_output=True)
     subprocess.run(['git', 'clean', '-fd'], cwd=repo_path, capture_output=True)
-    
+
     # Apply fuzzy
     success, msg, files = apply_patch_fuzzy(patch, str(repo_path), threshold=0.6)
-    
+
     strict_patch = ""
     if success and files:
         # Generate strict diff
         result = subprocess.run(
-            ['git', 'diff'], 
-            cwd=repo_path, 
-            capture_output=True, 
+            ['git', 'diff'],
+            cwd=repo_path,
+            capture_output=True,
             text=True
         )
         strict_patch = result.stdout
-    
+
     # Reset repo again
     subprocess.run(['git', 'reset', '--hard', 'HEAD'], cwd=repo_path, capture_output=True)
     subprocess.run(['git', 'clean', '-fd'], cwd=repo_path, capture_output=True)
-    
+
     return strict_patch
 
 def main():
-    parser = argparse.ArgumentParser(description="Run RAG Experiment (SWE-bench Full Dev)")
-    parser.add_argument("--num-instances", "-n", type=int, default=1, help="Number of instances to run")
-    parser.add_argument("--instance-id", type=str, help="Specific instance ID to run")
+    parser = argparse.ArgumentParser(description="Run RAG Experiment (SWE-bench Training Set - 19,008 instances)")
+    parser.add_argument("--num-instances", "-n", type=int, default=10, help="Number of instances to run")
+    parser.add_argument("--instance-id", type=str, help="Specific instance ID to run (comma-separated for multiple)")
     parser.add_argument("--model", "-m", type=str, default="deepseek/deepseek-chat")
     parser.add_argument("--temperature", "-t", type=float, default=0.2)
-    parser.add_argument("--experiment-name", "-e", type=str, default="rag_dev")
+    parser.add_argument("--experiment-name", "-e", type=str, default="rag_train")
 
     args = parser.parse_args()
 
     print("=" * 60)
-    print("RAG Experiment (SWE-bench Full Dev)")
+    print("RAG Experiment (SWE-bench Training Set)")
     print("=" * 60)
 
-    # Load dataset
-    print(f"\nLoading dataset...")
-    all_instances = load_swe_bench_dev()
+    # Load training dataset (19,008 instances)
+    print(f"\nLoading SWE-bench training dataset...")
+    all_instances = load_swe_bench_train()
+    print(f"Loaded {len(all_instances)} training instances")
 
-    # Extract dev IDs for data leakage prevention
-    dev_ids = {inst.instance_id for inst in all_instances}
-    print(f"Excluding {len(dev_ids)} dev instances from RAG training corpus...")
+    # No exclusions needed - we're running on training set
+    # (Example retriever will use other training instances as examples)
 
     if args.instance_id:
         if ',' in args.instance_id:
@@ -90,7 +90,7 @@ def main():
             print(f"Running single instance: {instances[0].instance_id}")
     else:
         instances = create_stratified_subset(all_instances, n=args.num_instances)
-        print(f"Running {len(instances)} instances")
+        print(f"Running {len(instances)} instances (stratified subset)")
 
     # Initialize
     print(f"\nInitializing LLM provider ({args.model})...")
@@ -101,12 +101,14 @@ def main():
         return
 
     print("Initializing RAG pipeline...")
+    # Extract current instance IDs for exclusion from examples
+    current_ids = {inst.instance_id for inst in instances}
     pipeline = RAGPipeline(
         llm_provider=llm,
         temperature=args.temperature,
-        exclude_example_ids=dev_ids,
+        exclude_example_ids=current_ids,  # Exclude current instances from examples
     )
-    
+
     # Run
     print(f"\nRunning experiment...")
     runner = ExperimentRunner(experiment_name=args.experiment_name)
@@ -115,7 +117,7 @@ def main():
         pipeline=pipeline,
         attempts_per_instance=1,
     )
-    
+
     # Strictify Patches
     print(f"\nStrictifying patches for evaluation...")
     count = 0
@@ -137,12 +139,14 @@ def main():
                 print(f"[OK] Strictified {inst['instance_id']}")
             else:
                 print(f"[WARN] Could not strictify {inst['instance_id']} (Fuzzy apply failed or empty diff)")
-    
+
     # Save updated results
     with open(runner.results_file, 'w') as f:
         json.dump(results, f, indent=2)
-        
+
     print(f"\n[SUCCESS] Saved results with strict patches to {runner.results_file}")
+    print(f"Total instances processed: {len(results['instances'])}")
+    print(f"Successfully strictified: {count}/{len(results['instances'])}")
 
 if __name__ == "__main__":
     main()
