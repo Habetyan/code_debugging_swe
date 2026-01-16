@@ -4,6 +4,9 @@ Supports adaptive weighting and cross-encoder reranking.
 """
 import numpy as np
 import re
+import pickle
+import hashlib
+from pathlib import Path
 from typing import List, Tuple
 from sentence_transformers import SentenceTransformer
 import faiss
@@ -24,51 +27,96 @@ class HybridRetriever:
         embedding_model: str = "all-MiniLM-L6-v2",
         embedding_weight: float = 0.7,
         bm25_weight: float = 0.3,
+        cache_dir: str = "cache/hybrid_retriever",
+        use_cache: bool = True,
     ):
         self.corpus = corpus
         self.embedding_weight = embedding_weight
         self.bm25_weight = bm25_weight
-        
-        # Initialize embedding model
+        self.embedding_model = embedding_model
+        self.use_cache = use_cache
+
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
         print(f"Loading embedding model: {embedding_model}...")
         self.encoder = SentenceTransformer(embedding_model)
-        
-        # Initialize Reranker (optional)
+
         self.reranker = None
         try:
             from sentence_transformers import CrossEncoder
-            # Lightweight cross-encoder
             self.reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
             print("CrossEncoder reranker loaded.")
         except Exception as e:
             print(f"Reranker not enabled: {e}")
-        
-        # Build indices
-        self._build_indices()
-    
-    def _build_indices(self):
-        """Build FAISS and BM25 indices."""
+
+        self._load_or_build_indices()
+
+    def _compute_corpus_hash(self) -> str:
+        texts = [doc.content for doc in self.corpus]
+        corpus_str = "".join(texts) + self.embedding_model
+        return hashlib.md5(corpus_str.encode()).hexdigest()
+
+    def _get_cache_paths(self, corpus_hash: str):
+        faiss_path = self.cache_dir / f"faiss_{corpus_hash}.bin"
+        embeddings_path = self.cache_dir / f"embeddings_{corpus_hash}.npy"
+        bm25_path = self.cache_dir / f"bm25_{corpus_hash}.pkl"
+        return faiss_path, embeddings_path, bm25_path
+
+    def _load_or_build_indices(self):
         if len(self.corpus) == 0:
             raise ValueError("Cannot build indices on empty corpus")
-        
-        # Extract texts
+
+        corpus_hash = self._compute_corpus_hash()
+        faiss_path, embeddings_path, bm25_path = self._get_cache_paths(corpus_hash)
+
+        if self.use_cache and faiss_path.exists() and embeddings_path.exists() and bm25_path.exists():
+            print("Loading indices from cache...")
+            self.faiss_index = faiss.read_index(str(faiss_path))
+            self.embeddings = np.load(str(embeddings_path))
+            with open(bm25_path, 'rb') as f:
+                bm25_data = pickle.load(f)
+                self.bm25 = BM25Okapi(bm25_data['tokenized'], **bm25_data['params'])
+            print(f"Indices loaded from cache: {len(self.corpus)} documents")
+        else:
+            self._build_indices()
+            if self.use_cache:
+                print("Saving indices to cache...")
+                faiss.write_index(self.faiss_index, str(faiss_path))
+                np.save(str(embeddings_path), self.embeddings)
+                texts = [doc.content for doc in self.corpus]
+                tokenized = [text.lower().split() for text in texts]
+                bm25_data = {
+                    'tokenized': tokenized,
+                    'params': {
+                        'k1': self.bm25.k1,
+                        'b': self.bm25.b,
+                        'epsilon': self.bm25.epsilon
+                    }
+                }
+                with open(bm25_path, 'wb') as f:
+                    pickle.dump(bm25_data, f)
+                print("Indices saved to cache.")
+
+    def _build_indices(self):
+        if len(self.corpus) == 0:
+            raise ValueError("Cannot build indices on empty corpus")
+
         texts = [doc.content for doc in self.corpus]
-        
-        # Build FAISS index
+
         print("Building FAISS index...")
         embeddings = self.encoder.encode(texts, show_progress_bar=True)
         self.embeddings = np.array(embeddings).astype('float32')
-        
+
         dimension = self.embeddings.shape[1]
-        self.faiss_index = faiss.IndexFlatIP(dimension)  # Inner product (cosine with normalized)
-        faiss.normalize_L2(self.embeddings)  # Normalize for cosine similarity
+        self.faiss_index = faiss.IndexFlatIP(dimension)
+        faiss.normalize_L2(self.embeddings)
         self.faiss_index.add(self.embeddings)
-        
-        # Build BM25 index
+
         print("Building BM25 index...")
         tokenized = [text.lower().split() for text in texts]
         self.bm25 = BM25Okapi(tokenized)
-        
+
         print(f"Indices built: {len(self.corpus)} documents")
     
     def search(

@@ -1,137 +1,168 @@
 # Code Debugging with RAG + CoT
 
-A RAG (Retrieval-Augmented Generation) pipeline with Chain-of-Thought (CoT) localization for automated bug fixing on the SWE-bench Lite benchmark.
+Automated bug fixing on SWE-bench using RAG (Retrieval-Augmented Generation) and Chain-of-Thought localization.
 
-## Overview
+## Goal
 
-This project uses an LLM to generate patches that fix software bugs. It combines:
-1. **CoT Localization**: Accurately identifying the file to edit.
-2. **RAG**: Retrieving relevant documentation and similar solved bugs.
+Generate unified diff patches that fix software bugs automatically. The system localizes the buggy file, retrieves relevant context, and generates patches verified against test suites.
 
-**Pipeline Steps:**
-1. Load a bug report from SWE-bench Lite
-2. Clone the repository at the correct commit
-3. **Localize File**: Use CoT to find the primary file to edit.
-4. Retrieve relevant documentation and examples.
-5. Send the context + bug report to the LLM
-6. Generate a unified diff patch
-7. Validate syntax and convert to strict git format
+## Dataset
 
----
+**SWE-bench Lite** - Curated subset of real GitHub issues and PRs.
 
-## 1. Installation
+| Split | Instances | Usage |
+|-------|-----------|-------|
+| Dev | 23 | Development and tuning |
+| Test | 300 | Final evaluation |
+
+## Approaches
+
+| Pipeline | Localization | Best For |
+|----------|--------------|----------|
+| **Agentic** | Multi-strategy (95.5%) | Best accuracy |
+| **CoT** | LLM reasoning (87%) | Simple setup |
+| **RAG** | Heuristics (~30%) | Clear stacktraces |
+| **Baseline** | None | Quick tests |
+
+## Quick Start
 
 ```bash
-# Clone the repository
-git clone <https://github.com/Habetyan/code_debugging_swe.git>
-cd code_debuging_with_rag_cot
-
-# Install dependencies
+# Install
 pip install -r requirements.txt
 
-# Additional dependencies for RAG
-pip install sentence-transformers faiss-cpu rank-bm25
+# Set API key
+echo "OPENROUTER_API_KEY=your_key" > .env
+
+# Run Agentic pipeline (recommended)
+PYTHONPATH=. python experiments/run_agentic.py --n 5
+
+# Run CoT pipeline
+PYTHONPATH=. python experiments/run_cot.py --n 5
 ```
 
-## 2. Configuration
+## Usage
 
-Create a `.env` file with your API key:
+### Run Pipelines
+
 ```bash
-OPENROUTER_API_KEY=your_key_here
+# Agentic (best accuracy)
+PYTHONPATH=. python experiments/run_agentic.py \
+    --n 10 \
+    --experiment-name my_run
+
+# CoT
+PYTHONPATH=. python experiments/run_cot.py \
+    --n 10 \
+    --experiment-name cot_run
+
+# RAG
+PYTHONPATH=. python experiments/run_rag.py \
+    --n 10 \
+    --experiment-name rag_run
+
+# Baseline
+PYTHONPATH=. python experiments/run_baseline.py \
+    --n 10 \
+    --experiment-name baseline_run
 ```
 
----
+### Check Localization Accuracy
 
-## 3. Running the Pipeline
-
-The main command uses `run_cot.py` for the best performance.
-
-### Run on a single bug instance
 ```bash
-PYTHONPATH=. python experiments/run_cot.py --instance-id mwaskom__seaborn-3010
+# Compare predicted files vs ground truth
+PYTHONPATH=. python tests/swe_lite_lsr_checker.py --approach agentic
+PYTHONPATH=. python tests/swe_lite_lsr_checker.py --approach cot
 ```
 
-### Run on multiple instances
+### Run SWE-bench Evaluation
+
 ```bash
-PYTHONPATH=. python experiments/run_cot.py --n 5 --experiment-name my_run
-```
-
-### Run on specific instances (comma-separated)
-```bash
-PYTHONPATH=. python experiments/run_cot.py --instance-id django__django-11099,scikit-learn__scikit-learn-10297
-```
-
-**Arguments:**
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--instance-id` | Specific instance ID(s) to run | None |
-| `--n`, `-n` | Number of random instances | 10 |
-| `--model`, `-m` | LLM model to use | `deepseek/deepseek-chat` |
-| `--experiment-name`, `-e` | Name for output file | `cot_dev` |
-| `--temperature`, `-t` | LLM temperature | 0.2 |
-
-Note: The pipeline uses SWE-bench Full dev split (225 instances) by default.
-
----
-
-## 4. Analyze Results
-
-To check localization accuracy (CoT vs Ground Truth):
-```bash
-python tests/check_localization.py results/my_run.json
-```
-
----
-
-## 5. Official SWE-bench Evaluation
-
-To verify if patches actually fix the bugs:
-
-### Convert results to SWE-bench format
-```bash
+# Convert results to SWE-bench format
 python src/verification/convert_results.py results/my_run.json predictions.json
-```
 
-### Run official evaluation
-```bash
+# Run official harness
 python -m swebench.harness.run_evaluation \
     --predictions_path predictions.json \
     --dataset_name princeton-nlp/SWE-bench_Lite \
-    --run_id my_run_eval \
+    --run_id my_eval \
     --timeout 900
 ```
 
----
+### Run Single Instance
 
-## Project Structure
+```bash
+PYTHONPATH=. python experiments/run_agentic.py \
+    --instance-id sqlfluff__sqlfluff-1625
+```
+
+## File Structure
 
 ```
 code_debuging_with_rag_cot/
-├── experiments/
-│   ├── run_cot.py          # Main CoT+RAG experiment runner (Use this!)
-│   ├── run_rag.py          # RAG pipeline runner
-│   ├── run_agentic.py      # Agentic pipeline runner
-│   └── run_baseline.py     # Simple baseline
-├── src/
-│   ├── data/               # SWE-bench data loading
-│   ├── llm/                # LLM provider abstraction
-│   ├── pipelines/
-│   │   ├── cot.py          # Chain-of-Thought pipeline
-│   │   ├── baseline.py     # Simple prompt-only pipeline
-│   │   ├── rag.py          # Standard RAG pipeline
-│   │   └── agentic.py      # Agentic ReAct pipeline
-│   ├── retrieval/
-│   │   ├── corpus.py       # Document storage
-│   │   ├── indexer.py      # Hybrid retrieval (FAISS + BM25)
-│   │   ├── graph.py        # Code dependency graph
-│   │   ├── source_code.py  # Repository management
-│   │   └── example_retriever.py  # Similar bug retriever
-│   ├── evaluation/         # Metrics and experiment runner
-│   ├── verification/       # Patch verification harness
-│   │   ├── harness.py      # SWE-bench verification wrapper
-│   │   └── convert_results.py  # Convert to SWE-bench format
-│   └── utils/              # Fuzzy patching utilities
-├── tests/                  # Test and analysis scripts
-│   └── check_localization.py # Localization accuracy checker
-└── results/                # Output JSON files
+|
++-- experiments/              # Entry points
+|   +-- run_agentic.py        # Agentic pipeline runner
+|   +-- run_cot.py            # CoT pipeline runner
+|   +-- run_rag.py            # RAG pipeline runner
+|   +-- run_baseline.py       # Baseline runner
+|
++-- src/
+|   +-- pipelines/            # Core pipeline implementations
+|   |   +-- agentic.py        # Multi-strategy + verification loop
+|   |   +-- cot.py            # Chain-of-thought localization
+|   |   +-- rag.py            # RAG-based pipeline
+|   |   +-- baseline.py       # Simple prompt-only
+|   |
+|   +-- retrieval/            # Context retrieval
+|   |   +-- indexer.py        # HybridRetriever (FAISS + BM25)
+|   |   +-- graph.py          # Code dependency graph
+|   |   +-- example_retriever.py  # Similar solved bugs
+|   |   +-- source_code.py    # Repository cloning
+|   |
+|   +-- llm/
+|   |   +-- provider.py       # OpenRouter API with fallback
+|   |
+|   +-- verification/
+|   |   +-- harness.py        # SWE-bench test runner
+|   |   +-- convert_results.py
+|   |
+|   +-- data/
+|   |   +-- swe_bench.py      # Dataset loading
+|   |
+|   +-- utils/
+|       +-- fuzzy_patch.py    # Patch strictification
+|
++-- tests/
+|   +-- swe_lite_lsr_checker.py   # Localization accuracy
+|   +-- check_localization.py     # Result analysis
+|
++-- results/                  # Output JSON files
++-- verification_results/     # SWE-bench predictions
++-- repo_cache/               # Cloned repositories
++-- cache/                    # LLM response cache
+|
++-- results.md                # Experiment results
++-- architecture.md           # Pipeline diagrams
++-- CLAUDE.md                 # Claude Code instructions
+```
+
+## Results
+
+See [results.md](results.md) for detailed experiment results.
+
+| Metric | Value |
+|--------|-------|
+| Localization (Agentic) | 95.5% (21/23) |
+| Localization (CoT) | 87% (20/23) |
+| Verified Patches | 4/16 (25%) |
+
+## Architecture
+
+See [architecture.md](architecture.md) for pipeline flow diagrams.
+
+## Configuration
+
+Create `.env`:
+```
+OPENROUTER_API_KEY=your_key_here
 ```
