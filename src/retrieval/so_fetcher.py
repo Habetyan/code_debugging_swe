@@ -44,17 +44,17 @@ class StackOverflowFetcher:
                     doc_id = f"so-{item['question_id']}"
                     
                     content = f"Question: {title}\n\n{q_body}\n\n"
-                    
-                    # Add top answer
+
+                    # Add top 2 answers (accepted first, then by votes)
                     if 'answers' in item and len(item['answers']) > 0:
-                        # Find accepted or highest voted
-                        answers = item['answers']
-                        accepted = next((a for a in answers if a.get('is_accepted')), None)
-                        if not accepted:
-                            accepted = answers[0]
-                            
-                        ans_body = html.unescape(accepted.get('body_markdown', accepted.get('body', '')))
-                        content += f"Answer:\n{ans_body}"
+                        answers = sorted(item['answers'],
+                                        key=lambda a: (a.get('is_accepted', False), a.get('score', 0)),
+                                        reverse=True)
+
+                        for i, ans in enumerate(answers[:2]):
+                            ans_body = html.unescape(ans.get('body_markdown', ans.get('body', '')))
+                            label = "Accepted Answer" if ans.get('is_accepted') else f"Answer {i+1}"
+                            content += f"{label}:\n{ans_body}\n\n"
                     
                     documents.append(Document(
                         doc_id=doc_id,
