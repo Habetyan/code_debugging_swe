@@ -20,6 +20,7 @@ from src.pipelines.baseline import PipelineResult
 from src.retrieval.indexer import HybridRetriever
 from src.retrieval.corpus import DocumentCorpus
 from src.retrieval.graph import CodeGraph
+from src.validation.pass1_validator import validate_patch_pass1, validate_diff_quality, llm_self_critique
 
 
 # =============================================================================
@@ -836,6 +837,7 @@ class AgenticPipeline:
         temperature: float = 0.0,
         max_tokens: int = 4096,
         use_harness: bool = True,
+        use_pass1_validation: bool = False,
         exclude_example_ids: Optional[set] = None,
         harness_dataset: str = "princeton-nlp/SWE-bench_Lite",
         harness_split: str = "test",
@@ -854,6 +856,13 @@ class AgenticPipeline:
 
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.use_pass1_validation = use_pass1_validation
+
+        # If pass@1 mode, disable harness (no test execution during generation)
+        if use_pass1_validation and use_harness:
+            print("Note: pass@1 validation enabled - harness verification disabled during generation")
+            use_harness = False
+
         self.harness = VerificationHarness(dataset_name=harness_dataset, split=harness_split) if use_harness else None
         
         # Initialize Retriever with expanded corpus
@@ -2258,16 +2267,42 @@ START by searching: {search_hint if search_hint else "grep -rn 'ERROR_KEYWORD' -
             if first_patch is None:
                 first_patch = patch
 
-            # Stage 4: Verify patch - if it passes, we're done!
-            print(f"DEBUG [LLM]: Verifying patch for candidate {candidate_idx+1}...")
-            verified = self._verify_patch(instance, patch)
+            # Stage 4: Validation
+            if self.use_pass1_validation:
+                # pass@1 mode: Use static validation (no test execution)
+                print(f"DEBUG [LLM]: Running pass@1 validation for candidate {candidate_idx+1}...")
 
-            if verified:
-                print(f"DEBUG [LLM]: ✓ Patch VERIFIED for {target_file}!")
-                return patch
+                # Create LLM generate function for self-critique
+                def llm_gen(prompt, system, temp, max_tok):
+                    return self.llm.generate(prompt, system, temp, max_tok)
+
+                is_valid, issues = validate_patch_pass1(
+                    patch=patch,
+                    original_content=primary_content,
+                    patched_content=new_content,
+                    problem_statement=instance.problem_statement,
+                    llm_generate=llm_gen,
+                    skip_llm_critique=False
+                )
+
+                if is_valid:
+                    print(f"DEBUG [LLM]: ✓ pass@1 validation PASSED for {target_file}!")
+                    return patch
+                else:
+                    print(f"DEBUG [LLM]: ✗ pass@1 validation issues: {issues}")
+                    # Continue to try next candidate, but keep this as fallback
+                    continue
             else:
-                print(f"DEBUG [LLM]: ✗ Verification failed for {target_file}, trying next candidate...")
-                continue
+                # Original mode: Verify with harness (NOT pass@1)
+                print(f"DEBUG [LLM]: Verifying patch for candidate {candidate_idx+1}...")
+                verified = self._verify_patch(instance, patch)
+
+                if verified:
+                    print(f"DEBUG [LLM]: ✓ Patch VERIFIED for {target_file}!")
+                    return patch
+                else:
+                    print(f"DEBUG [LLM]: ✗ Verification failed for {target_file}, trying next candidate...")
+                    continue
 
         # If no candidate verified, return first valid patch (or None)
         if first_patch:
