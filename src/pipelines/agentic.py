@@ -1763,8 +1763,8 @@ class AgenticPipeline:
             print(f"DEBUG: Found {len(candidates)} LLM-assisted candidates")
             return filter_candidates(candidates)
 
-        # 8. ReAct exploration (last resort)
-        react = self._react_localize(instance, repo_path, candidates=list(candidates))
+        # 8. ReAct exploration (last resort) - limit to 5 steps to prevent excessive API calls
+        react = self._react_localize(instance, repo_path, candidates=list(candidates), max_steps=5)
         if react:
             candidates.update(react)
 

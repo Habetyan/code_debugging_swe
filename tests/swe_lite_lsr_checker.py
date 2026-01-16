@@ -7,6 +7,7 @@ import argparse
 import json
 import re
 import sys
+import signal
 from pathlib import Path
 from datetime import datetime
 
@@ -20,6 +21,11 @@ from src.pipelines.baseline import BaselinePipeline
 from src.pipelines.rag import RAGPipeline
 from src.pipelines.cot import CoTPipeline
 from src.pipelines.agentic import AgenticPipeline
+
+
+def timeout_handler(signum, frame):
+    """Handler for timeout signal."""
+    raise TimeoutError("Localization timeout exceeded")
 
 
 def extract_files_from_patch(patch: str) -> set[str]:
@@ -131,25 +137,41 @@ def run_localization_test(approach: str, model: str):
             print(f"{instance.instance_id:<45} | {'ERROR':<10} | Clone failed")
             continue
 
-        # Run localization
+        # Run localization with timeout (5 minutes max per instance)
         predicted_files = []
         try:
-            if approach == "baseline":
-                # For Baseline, run full pipeline to see what file it patches
-                result = pipeline.run(instance)
-                predicted_files = list(extract_files_from_patch(result.generated_patch))
-            elif approach == "agentic":
-                # Agentic returns list of candidates
-                predicted = localize_method(instance, repo_path)
-                if isinstance(predicted, list):
-                    predicted_files = [p.lstrip('./') for p in predicted if p]
-                elif predicted:
-                    predicted_files = [predicted.lstrip('./')]
-            else:
-                # RAG and CoT return a single string or None
-                predicted_file = localize_method(instance.problem_statement, repo_path)
-                if predicted_file:
-                    predicted_files = [predicted_file.lstrip('./')]
+            # Set timeout alarm
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(300)  # 5 minute timeout
+
+            try:
+                if approach == "baseline":
+                    # For Baseline, run full pipeline to see what file it patches
+                    result = pipeline.run(instance)
+                    predicted_files = list(extract_files_from_patch(result.generated_patch))
+                elif approach == "agentic":
+                    # Agentic returns list of candidates
+                    predicted = localize_method(instance, repo_path)
+                    if isinstance(predicted, list):
+                        predicted_files = [p.lstrip('./') for p in predicted if p]
+                    elif predicted:
+                        predicted_files = [predicted.lstrip('./')]
+                else:
+                    # RAG and CoT return a single string or None
+                    predicted_file = localize_method(instance.problem_statement, repo_path)
+                    if predicted_file:
+                        predicted_files = [predicted_file.lstrip('./')]
+            finally:
+                # Cancel alarm
+                signal.alarm(0)
+
+        except TimeoutError:
+            instance_result["status"] = "error"
+            instance_result["error"] = "Localization timeout (5 min)"
+            results["instances"].append(instance_result)
+            errors += 1
+            print(f"{instance.instance_id:<45} | {'TIMEOUT':<10} | Exceeded 5 min limit")
+            continue
         except Exception as e:
             instance_result["status"] = "error"
             instance_result["error"] = f"Localization failed: {str(e)}"

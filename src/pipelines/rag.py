@@ -434,7 +434,7 @@ class RAGPipeline(BaselinePipeline):
                 graph = CodeGraph(repo_path)
                 related_files = graph.get_related_files(primary_file, max_depth=1)
                 
-                for rf in related_files[:3]:
+                for rf in related_files[:1]:  # Reduced from 3 to 1 to save context
                     try:
                         content = (Path(repo_path) / rf).read_text()
                         if len(content) > 2000:
@@ -451,14 +451,14 @@ class RAGPipeline(BaselinePipeline):
         # 4. Retrieve Docs
         doc_context = ""
         if self.retriever and self.include_docs:
-            results = self.retriever.search(instance.problem_statement, top_k=3)
+            results = self.retriever.search(instance.problem_statement, top_k=1)  # Reduced from 3 to 1 to save context
             doc_context = self.retriever.format_context(results)
 
         # 4.5 Retrieve Similar Examples
         examples_content = "No similar examples found."
         if self.example_retriever:
             try:
-                examples = self.example_retriever.retrieve(instance.problem_statement, instance.repo, k=2)
+                examples = self.example_retriever.retrieve(instance.problem_statement, instance.repo, k=1)  # Reduced from 2 to 1 to save context
                 if examples:
                     examples_content = ""
                     for i, ex in enumerate(examples):
