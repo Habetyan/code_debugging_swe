@@ -51,7 +51,7 @@ class CodeGraph:
                             if f not in visited:
                                 queue.append((f, depth + 1))
             except Exception as e:
-                # print(f"Error parsing {current_file}: {e}")
+                print(f"Error parsing {current_file}: {e}")
                 continue
                 
         return related_files

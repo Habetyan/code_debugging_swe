@@ -24,7 +24,7 @@ class HybridRetriever:
     def __init__(
         self,
         corpus: DocumentCorpus,
-        embedding_model: str = "all-MiniLM-L6-v2",
+        embedding_model: str = "BAAI/bge-base-en-v1.5",
         embedding_weight: float = 0.7,
         bm25_weight: float = 0.3,
         cache_dir: str = "cache/hybrid_retriever",
@@ -40,7 +40,7 @@ class HybridRetriever:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         print(f"Loading embedding model: {embedding_model}...")
-        self.encoder = SentenceTransformer(embedding_model)
+        self.encoder = SentenceTransformer(embedding_model, trust_remote_code=True)
 
         self.reranker = None
         try:
@@ -184,7 +184,7 @@ class HybridRetriever:
         emb_w = self.embedding_weight
         
         if has_code_identifiers:
-            bm25_w *= 1.5  # Boost exact keyword matches for code
+            bm25_w *= 2  # Boost exact keyword matches for code
             emb_w *= 0.8   # Reduce semantic drift
 
         n_candidates = top_k * 5 if self.reranker else min(len(self.corpus), top_k * 3)

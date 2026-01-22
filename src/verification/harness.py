@@ -2,14 +2,10 @@
 Verification Harness: Wrapper around official SWE-bench harness for verifying patches.
 """
 import json
-import tempfile
-import contextlib
-import os
 import sys
 import subprocess
 import time
 from pathlib import Path
-from swebench.harness.run_evaluation import main as eval_main
 
 class VerificationHarness:
     """

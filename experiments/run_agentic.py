@@ -3,8 +3,6 @@ Agentic Experiment: Runs the Agentic pipeline (ReAct loop) on SWE-bench.
 Uses fuzzy patching for validation.
 """
 import argparse
-import os
-import subprocess
 import json
 import sys
 from pathlib import Path
@@ -13,56 +11,20 @@ from src.data.swe_bench import load_swe_bench_dataset, load_swe_bench_lite, crea
 from src.llm import LLMProvider
 from src.pipelines.agentic import AgenticPipeline
 from src.evaluation.runner import ExperimentRunner
-from src.utils.fuzzy_patch import apply_patch_fuzzy
+from src.utils.fuzzy_patch import apply_patch_fuzzy, strictify_patch
 
 
-def strictify_patch(patch: str, repo: str, base_commit: str) -> str:
-    """
-    Converts a fuzzy patch to a strict git diff by applying it fuzzily 
-    to a cached repo and then running git diff.
-    """
-    if not patch.strip():
-        return ""
-        
-    repo_name = repo.replace('/', '__')
-    dir_name = f"{repo_name}__{base_commit[:8]}"
-    repo_path = Path('repo_cache') / dir_name
-    
-    if not repo_path.exists():
-        if not os.path.exists('repo_cache'):
-            return ""
-        cache_dirs = [d for d in os.listdir('repo_cache') if repo_name in d]
-        if not cache_dirs:
-            return ""
-        repo_path = Path('repo_cache') / cache_dirs[0]
-    
-    subprocess.run(['git', 'reset', '--hard', 'HEAD'], cwd=repo_path, capture_output=True)
-    subprocess.run(['git', 'clean', '-fd'], cwd=repo_path, capture_output=True)
-    
-    success, msg, files = apply_patch_fuzzy(patch, str(repo_path), threshold=0.6)
-    
-    strict_patch = ""
-    if success and files:
-        result = subprocess.run(
-            ['git', 'diff'], 
-            cwd=repo_path, 
-            capture_output=True, 
-            text=True
-        )
-        strict_patch = result.stdout
-    
-    subprocess.run(['git', 'reset', '--hard', 'HEAD'], cwd=repo_path, capture_output=True)
-    subprocess.run(['git', 'clean', '-fd'], cwd=repo_path, capture_output=True)
-    
-    return strict_patch
+
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run Agentic Pipeline (Best Pass@1)")
     parser.add_argument("--n", "-n", type=int, default=5,
                         help="Number of instances to run")
-    parser.add_argument("--model", "-m", type=str, default="deepseek/deepseek-chat",
-                        help="Model to use")
+    parser.add_argument("--model", "-m", type=str, default="meta-llama/llama-3.1-8b-instruct",
+                        help="Model for localization (small/fast)")
+    parser.add_argument("--patch-model", "-pm", type=str, default="deepseek/deepseek-chat",
+                        help="Model for patch generation (stronger)")
     parser.add_argument("--experiment-name", "-e", type=str, default="agentic_run",
                         help="Name for the experiment")
     parser.add_argument("--instance-id", type=str, default=None,
@@ -74,6 +36,12 @@ def main():
                         help="Dataset to use: lite (has working docker images) or dev")
     parser.add_argument("--split", "-s", type=str, default=None,
                         help="Dataset split (lite: test/dev, dev: dev). Default: test for lite, dev for dev")
+    parser.add_argument("--self-critique", action="store_true",
+                        help="Enable LLM self-critique for patch validation (adds extra LLM call)")
+    parser.add_argument("--repo-embedding", action="store_true",
+                        help="Use repo file embedding for localization")
+    parser.add_argument("--no-harness", action="store_true",
+                        help="Disable SWE-bench harness verification (faster, just generate patches)")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -108,17 +76,27 @@ def main():
 
     print(f"Running {len(instances)} instances")
 
-    # Initialize LLM
-    print(f"\nInitializing LLM provider ({args.model})...")
+    # Initialize LLMs (dual-model: small for localization, strong for patches)
+    print(f"\nInitializing LLM providers...")
+    print(f"  Localization model: {args.model}")
+    print(f"  Patch model: {args.patch_model}")
     llm = LLMProvider(model=args.model)
+    patch_llm = LLMProvider(model=args.patch_model)
 
     print("Initializing Agentic pipeline...")
+    print(f"  Self-critique: {'ENABLED' if args.self_critique else 'DISABLED'}")
+    print(f"  Repo embedding: {'ENABLED' if args.repo_embedding else 'DISABLED'}")
+    print(f"  Harness verification: {'DISABLED' if args.no_harness else 'ENABLED'}")
     pipeline = AgenticPipeline(
         llm_provider=llm,
+        patch_llm_provider=patch_llm,
         temperature=args.temperature,
         exclude_example_ids=exclude_ids,
         harness_dataset=dataset_name,
         harness_split=split,
+        use_self_critique=args.self_critique,
+        use_repo_embedding=args.repo_embedding,
+        use_harness=not args.no_harness,
     )
     
     # Run experiment

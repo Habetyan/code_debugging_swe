@@ -3,6 +3,8 @@ Fuzzy Patching Utility: Applies patches with fuzzy matching.
 Allows applying patches even when line numbers shifted or context slightly changed.
 """
 import difflib
+import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Tuple
@@ -215,3 +217,48 @@ def apply_patch_fuzzy(patch: str, repo_path: str, threshold: float = 0.85) -> Tu
             all_success = False
 
     return all_success, '\n'.join(messages), files_modified
+
+
+def strictify_patch(patch: str, repo: str, base_commit: str) -> str:
+    """
+    Converts a fuzzy patch to a strict git diff by applying it fuzzily 
+    to a cached repo and then running git diff.
+    """
+    if not patch.strip():
+        return ""
+        
+    repo_name = repo.replace('/', '__')
+    dir_name = f"{repo_name}__{base_commit[:8]}"
+    repo_path = Path('repo_cache') / dir_name
+    
+    if not repo_path.exists():
+        if not os.path.exists('repo_cache'):
+            return ""
+        cache_dirs = [d for d in os.listdir('repo_cache') if repo_name in d]
+        if not cache_dirs:
+            return ""
+        repo_path = Path('repo_cache') / cache_dirs[0]
+    
+    # Reset repo first
+    subprocess.run(['git', 'reset', '--hard', 'HEAD'], cwd=repo_path, capture_output=True)
+    subprocess.run(['git', 'clean', '-fd'], cwd=repo_path, capture_output=True)
+    
+    # Apply fuzzy
+    success, msg, files = apply_patch_fuzzy(patch, str(repo_path), threshold=0.6)
+    
+    strict_patch = ""
+    if success and files:
+        # Generate strict diff
+        result = subprocess.run(
+            ['git', 'diff'], 
+            cwd=repo_path, 
+            capture_output=True, 
+            text=True
+        )
+        strict_patch = result.stdout
+    
+    # Reset repo again
+    subprocess.run(['git', 'reset', '--hard', 'HEAD'], cwd=repo_path, capture_output=True)
+    subprocess.run(['git', 'clean', '-fd'], cwd=repo_path, capture_output=True)
+    
+    return strict_patch

@@ -7,7 +7,16 @@ do NOT require test execution, maintaining pass@1 compliance.
 Checks included:
 1. Diff quality (size, deletions, keyword relevance)
 2. Syntax validation (ast.parse)
-3. LLM self-critique (code review, no execution)
+3. Balanced brackets/parentheses/braces
+4. Mass deletion detection
+5. Preserved code structure (functions/classes not deleted)
+6. Debug code detection (print, pdb, breakpoint)
+7. Defensive coding patterns (getattr with None, bare except)
+8. Indentation consistency (no mixed tabs/spaces)
+9. Import preservation
+10. Control flow removal (return/continue/break/raise)
+11. Parameter removal detection
+12. LLM self-critique (code review, no execution)
 
 These checks help improve patch quality while remaining pass@1 compatible
 because they don't use test execution feedback.
@@ -162,6 +171,237 @@ def validate_diff_quality(patch: str, problem_statement: str) -> Tuple[bool, str
 
 
 # =============================================================================
+#  ADDITIONAL HEURISTIC CHECKS
+# =============================================================================
+
+def check_debug_code_added(patch: str) -> Tuple[bool, str]:
+    """
+    Check if patch adds debug/print statements that shouldn't be in production.
+    Returns (is_ok, message).
+    """
+    # Get added lines only
+    added_lines = [l[1:] for l in patch.split('\n') if l.startswith('+') and not l.startswith('+++')]
+
+    debug_patterns = [
+        (r'\bprint\s*\(', 'print statement'),
+        (r'\bpdb\.set_trace\s*\(', 'pdb debugger'),
+        (r'\bbreakpoint\s*\(', 'breakpoint'),
+        (r'\blogging\.debug\s*\(', 'debug logging'),
+        (r'#\s*DEBUG', 'DEBUG comment'),
+        (r'#\s*TODO', 'TODO comment'),
+        (r'#\s*FIXME', 'FIXME comment'),
+        (r'#\s*HACK', 'HACK comment'),
+    ]
+
+    for line in added_lines:
+        for pattern, name in debug_patterns:
+            if re.search(pattern, line, re.IGNORECASE):
+                return False, f"Adds {name}: {line.strip()[:50]}"
+
+    return True, "OK"
+
+
+def check_defensive_coding(patch: str) -> Tuple[bool, str]:
+    """
+    Check for excessive defensive coding that might hide bugs.
+    Returns (is_ok, message).
+    """
+    added_lines = [l[1:] for l in patch.split('\n') if l.startswith('+') and not l.startswith('+++')]
+
+    suspicious_patterns = [
+        # getattr with None fallback - often hides the real issue
+        (r'getattr\s*\([^,]+,\s*[^,]+,\s*None\s*\)', 'getattr(..., None) - may hide real issue'),
+        # Broad exception catching
+        (r'except\s*:\s*$', 'bare except - catches too much'),
+        # Silent pass in except
+        (r'except.*:\s*\n\s*pass', 'silent exception handling'),
+    ]
+
+    suspicious_count = 0
+    for line in added_lines:
+        for pattern, name in suspicious_patterns:
+            if re.search(pattern, line):
+                suspicious_count += 1
+                if suspicious_count >= 2:
+                    return False, f"Multiple defensive patterns detected: {name}"
+
+    return True, "OK"
+
+
+def check_indentation_consistency(patched_content: str) -> Tuple[bool, str]:
+    """
+    Check for mixed tabs/spaces and inconsistent indentation.
+    Returns (is_ok, message).
+    """
+    lines = patched_content.split('\n')
+    has_tabs = False
+    has_spaces = False
+
+    for line in lines:
+        if line.startswith('\t'):
+            has_tabs = True
+        elif line.startswith('    '):
+            has_spaces = True
+
+    if has_tabs and has_spaces:
+        return False, "Mixed tabs and spaces for indentation"
+
+    return True, "OK"
+
+
+def check_import_issues(original: str, patched: str) -> Tuple[bool, str]:
+    """
+    Check that we didn't accidentally break imports.
+    Returns (is_ok, message).
+    """
+    try:
+        orig_tree = ast.parse(original)
+        patch_tree = ast.parse(patched)
+    except SyntaxError:
+        return True, "OK (skipped - parse error)"
+
+    # Get original imports
+    orig_imports = set()
+    for node in ast.walk(orig_tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                orig_imports.add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                orig_imports.add(node.module)
+
+    # Get patched imports
+    patch_imports = set()
+    for node in ast.walk(patch_tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                patch_imports.add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                patch_imports.add(node.module)
+
+    # Check if we removed important imports
+    removed = orig_imports - patch_imports
+    if removed:
+        # Filter out common false positives
+        important_removed = [i for i in removed if not i.startswith('_')]
+        if important_removed:
+            return False, f"Removed imports: {important_removed}"
+
+    return True, "OK"
+
+
+def check_balanced_brackets(patched_content: str) -> Tuple[bool, str]:
+    """
+    Quick check for balanced parentheses, brackets, braces.
+    Returns (is_ok, message).
+    """
+    # Count brackets (simple heuristic, not perfect due to strings)
+    open_parens = patched_content.count('(')
+    close_parens = patched_content.count(')')
+    open_brackets = patched_content.count('[')
+    close_brackets = patched_content.count(']')
+    open_braces = patched_content.count('{')
+    close_braces = patched_content.count('}')
+
+    if open_parens != close_parens:
+        diff = open_parens - close_parens
+        return False, f"Unbalanced parentheses ({diff:+d})"
+
+    if open_brackets != close_brackets:
+        diff = open_brackets - close_brackets
+        return False, f"Unbalanced brackets ({diff:+d})"
+
+    if open_braces != close_braces:
+        diff = open_braces - close_braces
+        return False, f"Unbalanced braces ({diff:+d})"
+
+    return True, "OK"
+
+
+def check_string_literals(patch: str) -> Tuple[bool, str]:
+    """
+    Check for common string issues in added code.
+    Returns (is_ok, message).
+    """
+    added_lines = [l[1:] for l in patch.split('\n') if l.startswith('+') and not l.startswith('+++')]
+
+    for line in added_lines:
+        # Check for unmatched quotes (simple heuristic)
+        single_quotes = line.count("'") - line.count("\\'") - line.count("'''") * 3
+        double_quotes = line.count('"') - line.count('\\"') - line.count('"""') * 3
+
+        # Very rough check - odd number of quotes might indicate issue
+        # Skip if line contains triple quotes (docstrings)
+        if "'''" not in line and '"""' not in line:
+            if single_quotes % 2 != 0 and double_quotes % 2 != 0:
+                return False, f"Possibly unmatched quotes: {line.strip()[:50]}"
+
+    return True, "OK"
+
+
+def check_control_flow_removal(patch: str) -> Tuple[bool, str]:
+    """
+    Check if patch removes control flow statements (return, continue, break, raise).
+    These are usually critical and shouldn't be removed without replacement.
+    Returns (is_ok, message).
+    """
+    removed_lines = [l[1:].strip() for l in patch.split('\n')
+                     if l.startswith('-') and not l.startswith('---')]
+    added_lines = [l[1:].strip() for l in patch.split('\n')
+                   if l.startswith('+') and not l.startswith('+++')]
+
+    # Keywords that are critical control flow
+    control_keywords = ['return', 'continue', 'break', 'raise']
+
+    for keyword in control_keywords:
+        # Count occurrences in removed vs added
+        removed_count = sum(1 for line in removed_lines
+                           if re.search(rf'\b{keyword}\b', line))
+        added_count = sum(1 for line in added_lines
+                         if re.search(rf'\b{keyword}\b', line))
+
+        # If we removed more than we added, that's suspicious
+        if removed_count > added_count:
+            return False, f"Removed {removed_count - added_count} '{keyword}' statement(s) without replacement"
+
+    return True, "OK"
+
+
+def check_parameter_removal(original: str, patched: str) -> Tuple[bool, str]:
+    """
+    Check if function parameters were removed.
+    Returns (is_ok, message).
+    """
+    try:
+        orig_tree = ast.parse(original)
+        patch_tree = ast.parse(patched)
+    except SyntaxError:
+        return True, "OK (skipped - parse error)"
+
+    # Get function signatures
+    def get_func_params(tree):
+        funcs = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                params = [arg.arg for arg in node.args.args]
+                funcs[node.name] = set(params)
+        return funcs
+
+    orig_funcs = get_func_params(orig_tree)
+    patch_funcs = get_func_params(patch_tree)
+
+    # Check each function that exists in both
+    for func_name in orig_funcs:
+        if func_name in patch_funcs:
+            removed_params = orig_funcs[func_name] - patch_funcs[func_name]
+            if removed_params:
+                return False, f"Function '{func_name}' lost parameters: {removed_params}"
+
+    return True, "OK"
+
+
+# =============================================================================
 #  SYNTAX VALIDATION
 # =============================================================================
 
@@ -256,8 +496,8 @@ def llm_self_critique(
         (approved, feedback)
     """
     prompt = SELF_CRITIQUE_PROMPT.format(
-        problem_statement=problem_statement[:2500],
-        patch=patch[:4000]
+        problem_statement=problem_statement[:5000],
+        patch=patch[:8000]
     )
 
     try:
@@ -312,24 +552,59 @@ def validate_patch_pass1(
     if not valid:
         issues.append(f"Diff quality: {msg}")
 
-    # 2. Syntax validation
+    # 2. Syntax validation (CRITICAL - fail fast)
     valid, msg = validate_syntax(patched_content)
     if not valid:
         issues.append(f"Syntax: {msg}")
         # If syntax fails, skip further checks that need parsed AST
         return False, issues
 
-    # 3. Mass deletion check
+    # 3. Balanced brackets check (before AST checks)
+    valid, msg = check_balanced_brackets(patched_content)
+    if not valid:
+        issues.append(f"Brackets: {msg}")
+
+    # 4. Mass deletion check
     valid, msg = validate_no_mass_deletion(original_content, patched_content)
     if not valid:
         issues.append(f"Structure: {msg}")
 
-    # 4. Preserved structure check (AST-based)
+    # 5. Preserved structure check (AST-based)
     valid, msg = validate_preserved_structure(original_content, patched_content)
     if not valid:
         issues.append(f"Structure: {msg}")
 
-    # 5. LLM self-critique (optional, but recommended)
+    # 6. Check for debug code added
+    valid, msg = check_debug_code_added(patch)
+    if not valid:
+        issues.append(f"Debug code: {msg}")
+
+    # 7. Check for defensive coding patterns
+    valid, msg = check_defensive_coding(patch)
+    if not valid:
+        issues.append(f"Defensive coding: {msg}")
+
+    # 8. Check indentation consistency
+    valid, msg = check_indentation_consistency(patched_content)
+    if not valid:
+        issues.append(f"Indentation: {msg}")
+
+    # 9. Check import issues
+    valid, msg = check_import_issues(original_content, patched_content)
+    if not valid:
+        issues.append(f"Imports: {msg}")
+
+    # 10. Check control flow removal (return/continue/break/raise)
+    valid, msg = check_control_flow_removal(patch)
+    if not valid:
+        issues.append(f"Control flow: {msg}")
+
+    # 11. Check parameter removal
+    valid, msg = check_parameter_removal(original_content, patched_content)
+    if not valid:
+        issues.append(f"Parameters: {msg}")
+
+    # 13. LLM self-critique (optional, but recommended)
     if llm_generate and not skip_llm_critique and not issues:
         # Only run LLM critique if basic checks passed
         approved, feedback = llm_self_critique(patch, problem_statement, llm_generate)
