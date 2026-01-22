@@ -16,11 +16,13 @@
 
 File localization determines which source file needs to be modified to fix the bug.
 
-| Approach | Accuracy | Correct | Wrong | Notes |
-|----------|----------|---------|-------|-------|
-| **Agentic** | 95.5% | 21/23 | 2 | Multi-strategy + keyword scoring |
-| **CoT** | 87.0% | 20/23 | 3 | LLM chain-of-thought reasoning |
-| **RAG** | ~39% | ~9/23 | ~14 | Stacktrace + grep heuristics |
+**Model:** `meta-llama/llama-3.1-8b-instruct`
+
+| Approach | Accuracy | Correct | Wrong | Time/Instance | LLM Calls |
+|----------|----------|---------|-------|---------------|-----------|
+| **Agentic (Multi-Heuristic)** | **100%** | 23 | 0 | 4.5s | 138 |
+| CoT (Chain-of-Thought) | 56.5% | 13 | 10 | 5.3s | 23 |
+| RAG (Embedding Only) | 52.2% | 12 | 11 | 5.6s | 0 |
 
 ### Agentic Localization Strategies
 1. Stacktrace file extraction
@@ -34,16 +36,6 @@ File localization determines which source file needs to be modified to fix the b
 
 ## Patch Generation Results
 
-### Agentic Pipeline
-
-**Dev Split Run**: 16 instances processed
-
-| Status | Count | Rate |
-|--------|-------|------|
-| Verified (tests pass) | 4 | 25% |
-| Generated (unverified) | 7 | 44% |
-| Failed to generate | 5 | 31% |
-
 ### Verified Patches
 
 | Instance ID | Repository | File Modified |
@@ -53,34 +45,32 @@ File localization determines which source file needs to be modified to fix the b
 | marshmallow-code__marshmallow-1359 | marshmallow-code/marshmallow | src/marshmallow/fields.py |
 | marshmallow-code__marshmallow-1343 | marshmallow-code/marshmallow | src/marshmallow/schema.py |
 
-### Generated But Unverified
+---
 
-| Instance ID | Status | Notes |
-|-------------|--------|-------|
-| sqlfluff__sqlfluff-1733 | Generated | Patch syntax issues |
-| pvlib__pvlib-python-1854 | Generated | Indentation problems |
-| pvlib__pvlib-python-1707 | Generated | Incomplete fix |
-| pydicom__pydicom-1256 | Generated | Wrong method call |
-| pydicom__pydicom-901 | Generated | Not tested |
-| pylint-dev__astroid-1196 | Generated | Wrong exception type |
-| pylint-dev__astroid-1333 | Generated | Indentation issues |
+## Patch Generation Results
 
-### Failed to Generate
+Pass@1 Validation here is not swe offical benchmark tool!
 
-| Instance ID | Error |
-|-------------|-------|
-| pylint-dev__astroid-1978 | LLM could not generate fix |
-| pvlib__pvlib-python-1606 | API rate limit |
-| pyvista__pyvista-4315 | LLM could not generate fix |
-| pydicom__pydicom-1413 | LLM could not generate fix |
-| pydicom__pydicom-1694 | LLM could not generate fix |
+**Models Used:**
+- Localization: `meta-llama/llama-3.1-8b-instruct`
+- Patch Generation: `deepseek/deepseek-chat`
+
+| Metric | Count | Rate |
+|--------|-------|------|
+| Total Instances | 23 | - |
+| Patches Generated | 22 | 95.7% |
+| Pass@1 Validation | 21 | 91.3% |
+| **Harness Verified** | **4** | **17.4%** |
 
 ---
 
-## Key Findings
+## Improvement History
 
-1. **Localization is critical**: Agentic's 95.5% accuracy vs CoT's 87% shows multi-strategy approach works better than pure LLM reasoning.
+### Pass@1 Validation Improvement
 
-2. **Test-stem matching is powerful**: Strategy that maps `test_X.py` to `X.py` catches many cases LLM misses.
+| Experiment | Pass@1 Validation | Change |
+|------------|-------------------|--------|
+| `agentic_lite_dev.json` (original) | 10/23 (43.5%) | baseline |
+| `agentic_lite_dev_v2.json` (prompt fixes) | 21/23 (91.3%) | +47.8% |
+| `agentic_dev_v3.json` (larger RAG limits) | 22/23 (95.7%) | +4.4% |
 
-4. **Model fallback helps**: Automatic fallback chain handles API failures.
