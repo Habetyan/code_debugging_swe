@@ -5,7 +5,6 @@ Handles API keys, fallback logic, validation, and caching.
 import os
 import time
 import hashlib
-import json
 from pathlib import Path
 from typing import Optional
 from openai import OpenAI
@@ -23,11 +22,7 @@ class LLMProvider:
     """
     
     DEFAULT_MODEL = "deepseek/deepseek-chat"
-    FALLBACK_MODELS = [
-        "qwen/qwen-2.5-coder-32b-instruct",  # Strong coding model
-        "deepseek/deepseek-coder",  # Optimized for code
-        "meta-llama/llama-3.1-70b-instruct",  # Good general reasoning
-    ]
+    FALLBACK_MODELS = []  # No fallback - use only specified model
 
     
     def __init__(
@@ -36,6 +31,7 @@ class LLMProvider:
         model: Optional[str] = None,
         cache_dir: str = "cache/llm",
         max_retries: int = 3,
+        disable_fallback: bool = False,
     ):
         # Load all API keys from environment
         self.api_keys = self._load_api_keys(api_key)
@@ -44,18 +40,24 @@ class LLMProvider:
                 "No OpenRouter API keys found. "
                 "Set OPENROUTER_API_KEY (and optionally OPENROUTER_API_KEY1, KEY2, etc.) in .env file."
             )
-        
+
         self.current_key_index = 0
         self.model = model or self.DEFAULT_MODEL
         self.max_retries = max_retries
-        
+        self.disable_fallback = disable_fallback
+
         # Initialize client with first key
         self.client = self._create_client(self.api_keys[0])
-        
+
         # Setup disk cache
         cache_path = Path(cache_dir)
         cache_path.mkdir(parents=True, exist_ok=True)
         self.cache = diskcache.Cache(str(cache_path))
+
+        # Call statistics
+        self.call_count = 0  # Total generate() calls
+        self.api_call_count = 0  # Actual API calls (not cached)
+        self.cache_hit_count = 0  # Cache hits
     
     def _load_api_keys(self, provided_key: Optional[str]) -> list[str]:
         """Load all available API keys from environment."""
@@ -122,15 +124,18 @@ class LLMProvider:
         Returns:
             Generated text response
         """
+        self.call_count += 1  # Track total calls
+
         stop_key = str(stop) if stop else ""
         cache_key = self._get_cache_key(
             f"{system_prompt or ''}|{prompt}|{stop_key}",
             self.model,
             temperature
         )
-        
+
         # Check cache
         if use_cache and cache_key in self.cache:
+            self.cache_hit_count += 1
             return self.cache[cache_key]
         
         messages = []
@@ -153,6 +158,7 @@ class LLMProvider:
                         stop=stop,
                     )
                     result = response.choices[0].message.content
+                    self.api_call_count += 1  # Track actual API calls
 
                     # Cache the result
                     if use_cache:
@@ -188,34 +194,35 @@ class LLMProvider:
             if not self._switch_to_next_key():
                 break
         
-        # All API keys exhausted, try fallback models
-        for fallback_model in self.FALLBACK_MODELS:
-            print(f"[Fallback] Trying model: {fallback_model}")
-            for attempt in range(self.max_retries):
-                try:
-                    response = self.client.chat.completions.create(
-                        model=fallback_model,
-                        messages=messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        stop=stop,
-                    )
-                    result = response.choices[0].message.content
-                    
-                    if use_cache:
-                        self.cache[cache_key] = result
-                    
-                    print(f"[Fallback] Success with {fallback_model}")
-                    return result
-                    
-                except Exception as e:
-                    last_error = e
-                    if attempt < self.max_retries - 1:
-                        time.sleep(2 ** attempt)
-                    continue
-        
-        # All options exhausted
-        raise RuntimeError(f"All API keys and fallback models failed. Last error: {last_error}")
+        # All API keys exhausted, try fallback models (unless disabled)
+        if not self.disable_fallback:
+            for fallback_model in self.FALLBACK_MODELS:
+                print(f"[Fallback] Trying model: {fallback_model}")
+                for attempt in range(self.max_retries):
+                    try:
+                        response = self.client.chat.completions.create(
+                            model=fallback_model,
+                            messages=messages,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            stop=stop,
+                        )
+                        result = response.choices[0].message.content
+                        self.api_call_count += 1
+
+                        if use_cache:
+                            self.cache[cache_key] = result
+
+                        print(f"[Fallback] Success with {fallback_model}")
+                        return result
+
+                    except Exception as e:
+                        last_error = e
+                        if attempt < self.max_retries - 1:
+                            time.sleep(2 ** attempt)
+                        continue
+
+        raise RuntimeError(f"All API keys exhausted. Last error: {last_error}")
     
     def clear_cache(self):
         """Clear the response cache."""
@@ -227,3 +234,102 @@ class LLMProvider:
             "size": len(self.cache),
             "volume_bytes": self.cache.volume(),
         }
+
+    def get_call_stats(self) -> dict:
+        """Get LLM call statistics."""
+        return {
+            "total_calls": self.call_count,
+            "api_calls": self.api_call_count,
+            "cache_hits": self.cache_hit_count,
+        }
+
+    def reset_call_stats(self):
+        """Reset call statistics counters."""
+        self.call_count = 0
+        self.api_call_count = 0
+        self.cache_hit_count = 0
+
+
+class OllamaProvider:
+    """
+    LLM provider for local Ollama models.
+    Uses OpenAI-compatible API at localhost:11434.
+    """
+
+    def __init__(
+        self,
+        model: str = "qwen2.5-coder:7b-instruct",
+        base_url: str = "http://localhost:11434/v1",
+        cache_dir: str = "cache/llm_ollama",
+    ):
+        self.model = model
+        self.client = OpenAI(base_url=base_url, api_key="ollama")  # Ollama doesn't need real key
+
+        # Setup disk cache
+        cache_path = Path(cache_dir)
+        cache_path.mkdir(parents=True, exist_ok=True)
+        self.cache = diskcache.Cache(str(cache_path))
+
+        # Call statistics
+        self.call_count = 0
+        self.api_call_count = 0
+        self.cache_hit_count = 0
+
+    def generate(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        temperature: float = 0.0,
+        max_tokens: int = 2048,
+        use_cache: bool = True,
+        stop: Optional[list[str]] = None,
+    ) -> str:
+        """Generate a response from local Ollama model."""
+        self.call_count += 1
+
+        # Cache key
+        stop_key = str(stop) if stop else ""
+        cache_content = f"{self.model}:{temperature}:{system_prompt or ''}|{prompt}|{stop_key}"
+        cache_key = hashlib.sha256(cache_content.encode()).hexdigest()
+
+        if use_cache and cache_key in self.cache:
+            self.cache_hit_count += 1
+            return self.cache[cache_key]
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stop=stop,
+            )
+            result = response.choices[0].message.content
+            self.api_call_count += 1
+
+            if use_cache:
+                self.cache[cache_key] = result
+
+            return result
+
+        except Exception as e:
+            raise RuntimeError(f"Ollama error: {e}")
+
+    def get_call_stats(self) -> dict:
+        """Get LLM call statistics."""
+        return {
+            "total_calls": self.call_count,
+            "api_calls": self.api_call_count,
+            "cache_hits": self.cache_hit_count,
+        }
+
+    def reset_call_stats(self):
+        """Reset call statistics counters."""
+        self.call_count = 0
+        self.api_call_count = 0
+        self.cache_hit_count = 0

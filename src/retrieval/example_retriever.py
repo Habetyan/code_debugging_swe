@@ -1,6 +1,5 @@
 import pickle
 import faiss
-import numpy as np
 from pathlib import Path
 from datasets import load_dataset
 from sentence_transformers import SentenceTransformer
@@ -24,8 +23,8 @@ class ExampleRetriever:
         self.index_path = self.cache_dir / "faiss_index.bin"
         self.data_path = self.cache_dir / "examples.pkl"
         
-        self.model_name = "all-MiniLM-L6-v2"
-        self.encoder = None  # Lazy load
+        self.model_name = "BAAI/bge-base-en-v1.5"
+        self.encoder = None  
         
         self.index = None
         self.examples = []
@@ -65,7 +64,7 @@ class ExampleRetriever:
             return
         
         if not self.encoder:
-            self.encoder = SentenceTransformer(self.model_name)
+            self.encoder = SentenceTransformer(self.model_name, trust_remote_code=True)
         
         texts = [f"{e['repo']} {e['problem_statement']}" for e in self.examples]
         embeddings = self.encoder.encode(texts, show_progress_bar=False, convert_to_numpy=True)
@@ -102,7 +101,7 @@ class ExampleRetriever:
         
         # Encoding
         print(f"  Encoding with {self.model_name}...")
-        self.encoder = SentenceTransformer(self.model_name)
+        self.encoder = SentenceTransformer(self.model_name, trust_remote_code=True)
         embeddings = self.encoder.encode(texts, show_progress_bar=True, convert_to_numpy=True)
         
         # Build FAISS Index
@@ -140,7 +139,7 @@ class ExampleRetriever:
             return []
 
         if not self.encoder:
-            self.encoder = SentenceTransformer(self.model_name)
+            self.encoder = SentenceTransformer(self.model_name, trust_remote_code=True)
 
         search_text = f"{repo} {query}"
 

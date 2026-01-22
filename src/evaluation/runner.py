@@ -5,7 +5,7 @@ from tqdm import tqdm
 from typing import Optional
 
 from src.data import SWEBenchInstance
-from src.pipelines.baseline import BaselinePipeline, PipelineResult
+from src.pipelines.baseline import BaselinePipeline
 
 
 class ExperimentRunner:

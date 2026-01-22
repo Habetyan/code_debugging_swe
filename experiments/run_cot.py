@@ -3,7 +3,6 @@ CoT Experiment: Runs the Chain-of-Thought pipeline on SWE-bench.
 Uses fuzzy patching to validate/strictify patches before submission.
 """
 import argparse
-import os
 import subprocess
 import json
 import sys
@@ -13,48 +12,10 @@ from src.data.swe_bench import load_swe_bench_dev, create_stratified_subset
 from src.llm import LLMProvider
 from src.pipelines.cot import CoTPipeline
 from src.evaluation.runner import ExperimentRunner
-from src.utils.fuzzy_patch import apply_patch_fuzzy
+from src.utils.fuzzy_patch import apply_patch_fuzzy, strictify_patch
 
 
-def strictify_patch(patch: str, repo: str, base_commit: str) -> str:
-    """
-    Converts a fuzzy patch to a strict git diff by applying it fuzzily 
-    to a cached repo and then running git diff.
-    """
-    if not patch.strip():
-        return ""
-        
-    # Find cached repo
-    repo_name = repo.replace('/', '__')
-    dir_name = f"{repo_name}__{base_commit[:8]}"
-    repo_path = Path('repo_cache') / dir_name
-    
-    if not repo_path.exists():
-        return ""
-    
-    # Reset repo first
-    subprocess.run(['git', 'reset', '--hard', 'HEAD'], cwd=repo_path, capture_output=True)
-    subprocess.run(['git', 'clean', '-fd'], cwd=repo_path, capture_output=True)
-    
-    # Apply fuzzy
-    success, msg, files = apply_patch_fuzzy(patch, str(repo_path), threshold=0.6)
-    
-    strict_patch = ""
-    if success and files:
-        # Generate strict diff
-        result = subprocess.run(
-            ['git', 'diff'], 
-            cwd=repo_path, 
-            capture_output=True, 
-            text=True
-        )
-        strict_patch = result.stdout
-    
-    # Reset repo again
-    subprocess.run(['git', 'reset', '--hard', 'HEAD'], cwd=repo_path, capture_output=True)
-    subprocess.run(['git', 'clean', '-fd'], cwd=repo_path, capture_output=True)
-    
-    return strict_patch
+
 
 
 def main():

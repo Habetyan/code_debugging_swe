@@ -11,7 +11,7 @@ import shutil
 
 from src.data import SWEBenchInstance
 from src.llm import LLMProvider
-from src.retrieval import HybridRetriever
+from src.retrieval import HybridRetriever, RepoFileRetriever
 from src.retrieval.source_code import RepoManager, extract_file_paths
 from src.retrieval.graph import CodeGraph
 from src.retrieval.corpus import DocumentCorpus
@@ -156,6 +156,7 @@ class RAGPipeline(BaselinePipeline):
     3. Symbol Search Fallback (Functions and Classes)
     4. Code Graph Expansion
     5. Syntax Validation
+    6. Semantic file search via repo embedding (optional, enabled with use_repo_embedding=True)
     """
     
     def __init__(
@@ -168,6 +169,7 @@ class RAGPipeline(BaselinePipeline):
         include_docs: bool = True,
         max_syntax_retries: int = 2,
         exclude_example_ids: Optional[set] = None,
+        use_repo_embedding: bool = False, 
     ):
         super().__init__(
             llm_provider=llm_provider,
@@ -179,6 +181,11 @@ class RAGPipeline(BaselinePipeline):
         self.repo_manager = repo_manager or RepoManager()
         self.include_docs = include_docs
         self.max_syntax_retries = max_syntax_retries
+        self.use_repo_embedding = use_repo_embedding
+        self.repo_retriever: Optional[RepoFileRetriever] = None
+
+        if use_repo_embedding:
+            self.repo_retriever = RepoFileRetriever()
 
         if include_docs:
             if retriever is None:
@@ -249,17 +256,53 @@ class RAGPipeline(BaselinePipeline):
         
         return docs
 
+    def _find_primary_file_embedding(self, problem_statement: str, repo_path: str) -> Optional[str]:
+        """Find the primary file using semantic search over repo files.
+
+        This is the approach: embed all Python files
+        and use semantic search to find the most relevant one.
+
+        Returns the top-1 result from embedding search.
+        """
+        if not self.repo_retriever:
+            return None
+
+        # Index the repo (this happens per instance)
+        n_chunks = self.repo_retriever.index_repo(repo_path)
+        if n_chunks == 0:
+            return None
+
+        # Search for top-1 candidate
+        results = self.repo_retriever.search(problem_statement, top_k=1)
+
+        if not results:
+            return None
+
+        return results[0][0]
+
     def _find_primary_file(self, problem_statement: str, repo_path: str) -> Optional[str]:
         """Find the primary file to edit using multiple strategies.
-        
+
+        If use_repo_embedding is True, uses semantic search first, then falls back to heuristics.
+        Otherwise, uses only heuristics.
+
         Priority order (most to least reliable):
-        1. Stacktrace files - shows exact error location
-        2. Explicit file paths in text
-        3. Module paths converted to files
-        4. Class name grep
-        5. Function name grep
+        1. Embedding search (if enabled) - semantic similarity to problem statement
+        2. Stacktrace files - shows exact error location
+        3. Explicit file paths in text
+        4. Module paths converted to files
+        5. Class name grep
+        6. Function name grep
         """
-        
+
+        # Strategy 0: Embedding-based search (if enabled)
+        if self.use_repo_embedding and self.repo_retriever:
+            embedding_result = self._find_primary_file_embedding(problem_statement, repo_path)
+            if embedding_result:
+                print(f"[EMBEDDING] Found primary file via semantic search: {embedding_result}")
+                return embedding_result
+            print("[EMBEDDING] Semantic search did not find a file, falling back to heuristics")
+
         # Strategy 1: Parse stacktraces (HIGHEST PRIORITY - shows error location)
         stacktrace_files = extract_stacktrace_files(problem_statement)
         for fp in stacktrace_files:
@@ -434,7 +477,7 @@ class RAGPipeline(BaselinePipeline):
                 graph = CodeGraph(repo_path)
                 related_files = graph.get_related_files(primary_file, max_depth=1)
                 
-                for rf in related_files[:1]:  # Reduced from 3 to 1 to save context
+                for rf in related_files[:1]:
                     try:
                         content = (Path(repo_path) / rf).read_text()
                         if len(content) > 2000:
@@ -451,19 +494,19 @@ class RAGPipeline(BaselinePipeline):
         # 4. Retrieve Docs
         doc_context = ""
         if self.retriever and self.include_docs:
-            results = self.retriever.search(instance.problem_statement, top_k=1)  # Reduced from 3 to 1 to save context
+            results = self.retriever.search(instance.problem_statement, top_k=1)  
             doc_context = self.retriever.format_context(results)
 
         # 4.5 Retrieve Similar Examples
         examples_content = "No similar examples found."
         if self.example_retriever:
             try:
-                examples = self.example_retriever.retrieve(instance.problem_statement, instance.repo, k=1)  # Reduced from 2 to 1 to save context
+                examples = self.example_retriever.retrieve(instance.problem_statement, instance.repo, k=1)  
                 if examples:
                     examples_content = ""
                     for i, ex in enumerate(examples):
                         examples_content += f"\n## Example {i+1} (from {ex['repo']})\n"
-                        examples_content += f"### Problem\n{ex['problem_statement'][:500]}...\n"
+                        examples_content += f"### Problem\n{ex['problem_statement'][:5000]}...\n"
                         examples_content += f"### Fix\n```diff\n{ex['patch']}\n```\n"
             except Exception as e:
                 print(f"Error retrieving examples: {e}")

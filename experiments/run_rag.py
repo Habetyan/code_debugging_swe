@@ -74,9 +74,6 @@ def main():
     all_instances = load_swe_bench_train()
     print(f"Loaded {len(all_instances)} training instances")
 
-    # No exclusions needed - we're running on training set
-    # (Example retriever will use other training instances as examples)
-
     if args.instance_id:
         if ',' in args.instance_id:
             target_ids = args.instance_id.split(',')
@@ -106,7 +103,7 @@ def main():
     pipeline = RAGPipeline(
         llm_provider=llm,
         temperature=args.temperature,
-        exclude_example_ids=current_ids,  # Exclude current instances from examples
+        exclude_example_ids=current_ids,  
     )
 
     # Run
