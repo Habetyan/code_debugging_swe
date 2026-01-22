@@ -15,14 +15,6 @@ Generate unified diff patches that fix software bugs automatically. The system l
 | Dev | 23 | Development and tuning |
 | Test | 300 | Final evaluation |
 
-## Approaches
-
-| Pipeline | Localization | Best For |
-|----------|--------------|----------|
-| **Agentic** | Multi-strategy (95.5%) | Best accuracy |
-| **CoT** | LLM reasoning (87%) | Simple setup |
-| **RAG** | Heuristics (~30%) | Clear stacktraces |
-| **Baseline** | None | Quick tests |
 
 ## Quick Start
 
