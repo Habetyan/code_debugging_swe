@@ -144,9 +144,10 @@ See [results.md](results.md) for detailed experiment results.
 
 | Metric | Value |
 |--------|-------|
-| Localization (Agentic) | 95.5% (21/23) |
-| Localization (CoT) | 87% (20/23) |
-| Verified Patches | 4/16 (25%) |
+| Localization (Agentic) | 100% (23/23) |
+| Localization (CoT) | 56.5% (13/23) |
+| Localization (RAG) | 52.2% (12/23) |
+| Verified Patches | 17.4% (4/23) |
 
 ## Architecture
 

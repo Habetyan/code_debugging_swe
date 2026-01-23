@@ -2,7 +2,7 @@
 
 ## Dataset
 
-**SWE-bench Lite Dev Split**: 23 instances from various Python repositories including:
+**SWE-bench Lite Dev Split**: 23 instances from various Python repositories:
 - sqlfluff/sqlfluff
 - marshmallow-code/marshmallow
 - pylint-dev/astroid
@@ -12,45 +12,20 @@
 
 ---
 
-## Localization Accuracy
-
-File localization determines which source file needs to be modified to fix the bug.
+## Localization Results
 
 **Model:** `meta-llama/llama-3.1-8b-instruct`
 
 | Approach | Accuracy | Correct | Wrong | Time/Instance | LLM Calls |
 |----------|----------|---------|-------|---------------|-----------|
-| **Agentic (Multi-Heuristic)** | **100%** | 23 | 0 | 4.5s | 138 |
+| **Agentic (Multi-Heuristic)** | **100%** | 23 | 0 | 4.5s | 178 |
 | CoT (Chain-of-Thought) | 56.5% | 13 | 10 | 5.3s | 23 |
 | RAG (Embedding Only) | 52.2% | 12 | 11 | 5.6s | 0 |
-
-### Agentic Localization Strategies
-1. Stacktrace file extraction
-2. Error message grep search
-3. Test file stem matching (test_X.py -> X.py)
-4. Rule/class identifier search
-5. Explicit file path mentions
-6. Module path conversion
-7. Code graph expansion (imports)
-8. Keyword scoring with test names
-
-## Patch Generation Results
-
-### Verified Patches
-
-| Instance ID | Repository | File Modified |
-|-------------|------------|---------------|
-| sqlfluff__sqlfluff-1625 | sqlfluff/sqlfluff | src/sqlfluff/rules/L031.py |
-| sqlfluff__sqlfluff-2419 | sqlfluff/sqlfluff | src/sqlfluff/rules/L060.py |
-| marshmallow-code__marshmallow-1359 | marshmallow-code/marshmallow | src/marshmallow/fields.py |
-| marshmallow-code__marshmallow-1343 | marshmallow-code/marshmallow | src/marshmallow/schema.py |
 
 ---
 
 ## Patch Generation Results
-
-Pass@1 Validation here is not swe offical benchmark tool!
-
+Pass@1 Validation is not swe benchamrk tool
 **Models Used:**
 - Localization: `meta-llama/llama-3.1-8b-instruct`
 - Patch Generation: `deepseek/deepseek-chat`
@@ -74,3 +49,19 @@ Pass@1 Validation here is not swe offical benchmark tool!
 | `agentic_lite_dev_v2.json` (prompt fixes) | 21/23 (91.3%) | +47.8% |
 | `agentic_dev_v3.json` (larger RAG limits) | 22/23 (95.7%) | +4.4% |
 
+**Total improvement: 43.5% → 95.7% (+52.2%)**
+
+Only 1 instance (`pydicom__pydicom-1413`) failed - the LLM couldn't generate a fix at all.
+
+---
+
+## Verified Patches (Passed Official SWE-bench Tests)
+
+| Instance ID | Repository | File Modified | Fix Description |
+|-------------|------------|---------------|-----------------|
+| marshmallow-code__marshmallow-1343 | marshmallow-code/marshmallow | src/marshmallow/schema.py | Fixed null data handling in schema validation |
+| marshmallow-code__marshmallow-1359 | marshmallow-code/marshmallow | src/marshmallow/fields.py | Fixed DateTime field binding to nested schemas |
+| sqlfluff__sqlfluff-1625 | sqlfluff/sqlfluff | src/sqlfluff/rules/L031.py | Fixed L031 rule for single-table queries |
+| sqlfluff__sqlfluff-2419 | sqlfluff/sqlfluff | src/sqlfluff/rules/L060.py | Replace IFNULL/NVL with COALESCE |
+
+---
